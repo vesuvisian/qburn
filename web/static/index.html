@@ -3,7 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>qburn — scene description</title>
+    <title>qburn</title>
+    <meta
+      name="description"
+      content="Qwen3-VL-2B on Burn end to end — CLI and WebGPU browser demo, plus a transformers.js comparison path."
+    />
     <link rel="icon" href="./logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="./logo.png" />
     <link rel="stylesheet" href="./demo.css" />
@@ -15,11 +19,18 @@
     />
   </head>
   <body>
-    <main class="stage">
+    <main class="stage landing">
       <nav class="site-nav" aria-label="Site">
-        <a href="./" aria-current="page">Demo</a>
-        <a href="./engineering.html">Engineering</a>
-        <a href="./how-it-works.html">How it works</a>
+        <a href="./" aria-current="page">Home</a>
+        <a href="./demo.html">Burn</a>
+        <a href="./tjs.html">transformers.js</a>
+        <a href="./architecture.html">Architecture</a>
+        <a href="./compare.html">Compare</a>
+        <a
+          href="https://github.com/vesuvisian/qburn"
+          rel="noopener noreferrer"
+          >GitHub</a
+        >
       </nav>
 
       <header class="brand">
@@ -27,49 +38,42 @@
           <img class="brand-mark" src="./logo.png" alt="" width="56" height="73" />
           <h1>qburn</h1>
         </div>
-        <p>Describe a scene with Qwen3-VL, running locally in your browser on WebGPU.</p>
+        <p class="lead">
+          Run Qwen3-VL with Burn — the same Rust model on the command line and
+          in the browser.
+        </p>
       </header>
 
-      <section class="panel" aria-label="Upload and describe">
-        <div id="gate" class="gate hidden"></div>
-        <div id="status" class="status">Checking WebGPU…</div>
-        <div id="progress" class="progress hidden" aria-hidden="true">
-          <div class="bar"><span id="barFill"></span></div>
-          <span id="progressLabel">0%</span>
-        </div>
+      <div class="cta-row">
+        <a class="cta" href="./demo.html">Burn demo</a>
+        <a class="cta" href="./tjs.html">transformers.js demo</a>
+      </div>
 
-        <label class="drop" id="dropZone" for="fileInput">
-          <input id="fileInput" type="file" accept="image/*" hidden />
-          <span>Drop an image here, or click to upload</span>
-        </label>
-
-        <div class="preview-row">
-          <img id="preview" alt="" class="preview hidden" />
-          <div class="controls">
-            <label class="prompt-label" for="prompt">Prompt</label>
-            <input
-              id="prompt"
-              type="text"
-              value="Describe this scene."
-              autocomplete="off"
-            />
-            <label class="prompt-label" for="temperature">Temperature</label>
-            <input
-              id="temperature"
-              type="number"
-              min="0"
-              max="1.5"
-              step="0.1"
-              value="0"
-              autocomplete="off"
-            />
-            <button id="describeBtn" type="button" disabled>Describe</button>
-          </div>
-        </div>
-
-        <output id="caption" class="caption" aria-live="polite"></output>
+      <section class="landing-body prose" aria-label="About">
+        <p>
+          Drop in a photo, ask for a description, and the model streams a
+          caption back. Vision and language are written as Burn modules — no
+          ONNX in the middle. What you run with
+          <code>cargo run -p qburn</code> on Metal or CUDA is what the wasm
+          build runs on WebGPU.
+        </p>
+        <p>
+          You’ll need a browser with WebGPU. The Burn demo pulls about 1.8 GiB
+          of weights (<code>q4-mix</code>) and is honestly slow — a short
+          caption can take a minute. That’s fine for poking at the stack; for
+          real speed, use the CLI. The transformers.js page is here so you can
+          try the usual ONNX path side by side.
+        </p>
+        <p>
+          There’s a walkthrough of the
+          <a href="./architecture.html">pipeline</a>, a
+          <a href="./compare.html">Burn vs transformers.js</a>
+          write-up, and the full project on
+          <a href="https://github.com/vesuvisian/qburn" rel="noopener noreferrer"
+            >GitHub</a
+          >.
+        </p>
       </section>
     </main>
-    <script type="module" src="./demo.js"></script>
   </body>
 </html>

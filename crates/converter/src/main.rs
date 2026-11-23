@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Upload the out-dir to Hugging Face Hub. Point the Pages demo at `manifest.json`
-//! (`window.QBURN_MANIFEST`). Prefer `q4-mix` for browser quality. See `web/static/how-it-works.html`.
+//! (`window.QBURN_MANIFEST`). Prefer `q4-mix` for browser quality. See `web/static/architecture.html`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

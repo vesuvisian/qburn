@@ -1,0 +1,20 @@
+{
+  "name": "qburn-tjs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local transformers.js CLI for Qwen3-VL (describe + prompt) — comparison twin to the Burn qburn CLI",
+  "bin": {
+    "qburn-tjs": "./bin.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.30.0": true,
+    "protobufjs@7.6.6": true
+  }
+}

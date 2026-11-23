@@ -10,7 +10,7 @@ Usage:
       --prompt "Hello" \\
       --out tests/parity/logits_ref.json
 
-See tests/parity/README.md and web/static/how-it-works.html#parity.
+See tests/parity/README.md and web/static/architecture.html#parity.
 """
 
 from __future__ import annotations

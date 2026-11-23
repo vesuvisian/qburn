@@ -7,7 +7,7 @@
  *   3. `./weights/manifest.json` when served locally via `preview.py --weights`
  *   4. Hugging Face Hub default
  *
- * See how-it-works.html and the repo README for convert / host steps.
+ * See architecture.html and the repo README for convert / host steps.
  */
 
 const HUB_MANIFEST =
@@ -22,6 +22,7 @@ const dropZone = document.getElementById("dropZone");
 const fileInput = document.getElementById("fileInput");
 const preview = document.getElementById("preview");
 const promptEl = document.getElementById("prompt");
+const maxTokensEl = document.getElementById("maxTokens");
 const temperatureEl = document.getElementById("temperature");
 const describeBtn = document.getElementById("describeBtn");
 const caption = document.getElementById("caption");
@@ -193,6 +194,9 @@ function runDescribe() {
     }
   }, 2000);
   const temperature = Number.parseFloat(temperatureEl.value);
+  let maxTokens = Number.parseInt(maxTokensEl.value, 10);
+  if (!Number.isFinite(maxTokens)) maxTokens = 128;
+  maxTokens = Math.max(16, Math.min(512, maxTokens));
   // Copy + transfer the ArrayBuffer so the worker avoids a structured-clone
   // of the full upload, while keeping `imageBytes` for re-runs.
   const transfer = imageBytes.buffer.slice(
@@ -204,7 +208,7 @@ function runDescribe() {
       type: "describe",
       imageBytes: transfer,
       prompt: promptEl.value || "Describe this scene.",
-      maxTokens: 128,
+      maxTokens,
       temperature: Number.isFinite(temperature) ? temperature : 0,
       probe: probeEnabled,
     },

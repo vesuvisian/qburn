@@ -11,3 +11,5 @@ web/dist
 site/
 docs/app/pkg*
 *.log
+node_modules/
+scripts/tjs-cli/node_modules/

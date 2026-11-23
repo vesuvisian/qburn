@@ -16,7 +16,7 @@
 //! Offline conversion lives in the `qburn-converter` crate
 //! (`WeightQuant::{Fp16,Q4,Q4Mix}`).
 //!
-//! See the repo `README.md` and `web/static/how-it-works.html` for end-to-end usage.
+//! See the repo `README.md` and `web/static/architecture.html` for end-to-end usage.
 #![recursion_limit = "512"]
 
 pub mod config;

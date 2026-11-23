@@ -3,150 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>qburn — engineering</title>
-    <meta
-      name="description"
-      content="Why qburn runs Qwen3-VL on Burn + WebGPU instead of transformers.js / ONNX Runtime."
-    />
-    <link rel="icon" href="./logo.png" type="image/png" />
-    <link rel="apple-touch-icon" href="./logo.png" />
-    <link rel="stylesheet" href="./demo.css" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <title>qburn — Burn vs transformers.js</title>
+    <meta http-equiv="refresh" content="0; url=./compare.html" />
+    <link rel="canonical" href="./compare.html" />
+    <script>
+      location.replace("./compare.html" + location.hash);
+    </script>
   </head>
   <body>
-    <main class="stage article">
-      <nav class="site-nav" aria-label="Site">
-        <a href="./">Demo</a>
-        <a href="./engineering.html" aria-current="page">Engineering</a>
-        <a href="./how-it-works.html">How it works</a>
-      </nav>
-
-      <header class="brand">
-        <div class="brand-lockup">
-          <img class="brand-mark" src="./logo.png" alt="" width="56" height="73" />
-          <h1>qburn</h1>
-        </div>
-        <p>
-          Same Rust model on the CLI and in this browser demo — Burn on
-          WebGPU, not an ONNX export.
-        </p>
-      </header>
-
-      <article class="prose">
-        <section>
-          <h2>What this is (and isn’t)</h2>
-          <p>
-            You can already run Qwen3-VL in the browser with transformers.js.
-            That path exports the model to ONNX and lets ONNX Runtime drive
-            WebGPU. It’s faster, more polished, and what you’d ship for a
-            product demo.
-          </p>
-          <p>
-            qburn is doing something narrower: the vision tower, fusion, and
-            language decoder are written as Burn modules in Rust. The CLI runs
-            those modules on Metal or CUDA. The page is the same modules,
-            compiled to wasm, talking to the browser’s WebGPU. There’s no
-            separate “web model.”
-          </p>
-        </section>
-
-        <section>
-          <h2>Where the stacks diverge</h2>
-          <div class="compare" role="table" aria-label="Stack comparison">
-            <div class="compare-row compare-head" role="row">
-              <span role="columnheader"></span>
-              <span role="columnheader">qburn</span>
-              <span role="columnheader">transformers.js</span>
-            </div>
-            <div class="compare-row" role="row">
-              <span role="rowheader">Model</span>
-              <span>Rust Burn modules you can read and step through</span>
-              <span>ONNX graphs exported from Hugging Face</span>
-            </div>
-            <div class="compare-row" role="row">
-              <span role="rowheader">GPU work</span>
-              <span>CubeCL kernels lowered to WGSL</span>
-              <span>ONNX Runtime’s WebGPU execution provider</span>
-            </div>
-            <div class="compare-row" role="row">
-              <span role="rowheader">Page glue</span>
-              <span>wasm-bindgen inside a Web Worker</span>
-              <span>JavaScript calling into ORT</span>
-            </div>
-            <div class="compare-row" role="row">
-              <span role="rowheader">Weights</span>
-              <span>Sharded burnpacks (usually q4-mix), Cache API</span>
-              <span>ONNX files with ORT’s own quant formats</span>
-            </div>
-            <div class="compare-row" role="row">
-              <span role="rowheader">Desktop twin</span>
-              <span>Same crate as <code>cargo run -p qburn</code></span>
-              <span>Different stack from the PyTorch training code</span>
-            </div>
-          </div>
-        </section>
-
-        <section>
-          <h2>Why bother</h2>
-          <p>
-            If the goal is “caption an image in Chrome,” transformers.js wins.
-            This project is useful when you care whether Burn can carry a real
-            multimodal model across the browser’s sharp edges: workgroup shared
-            memory is often only ~32 KiB, a 2B pack has to fit wasm32 after
-            shard concat, and turning on fusion or autotune can emit WGSL that
-            bricks the device for the rest of the session.
-          </p>
-          <p>
-            Keeping one codebase also forces honesty about backends. Metal and
-            browser WGSL are not the same CubeCL path. We compare the same
-            burnpack on the Metal CLI, a native WGSL CLI build, and this page
-            instead of papering gaps with prompt tricks.
-          </p>
-        </section>
-
-        <section>
-          <h2>What had to be true for the demo</h2>
-          <p>
-            The page runs the full instruct cascade — image patches through the
-            vision tower, visual tokens spliced into the chat template, then
-            the Qwen3 decoder with a KV cache — not a stub that only embeds an
-            image. Weights are quantized for the browser: <code>q4-mix</code>
-            leaves embeddings, norms, and the vision I/O path in F16 and
-            compresses the big linear layers; plain <code>q4</code> is smaller
-            but rougher. Full fp16 packs don’t fit once expanded in wasm32.
-          </p>
-          <p>
-            Matmul tile sizes come from Burn 0.23’s hardware-aware planner, so
-            kernels respect the adapter’s shared-memory limit instead of asking
-            for desktop-sized tiles browsers reject. Prefill logit probes exist
-            so you can tell “this quant is lossy” from “WebGPU drifted.”
-          </p>
-        </section>
-
-        <section>
-          <h2>Speed</h2>
-          <p>
-            Expect this demo to be much slower than transformers.js for a short
-            caption — often on the order of a minute. That’s a real limitation,
-            not a temporary demo quirk. Use the CLI when you want throughput;
-            use the page when you want to see the Burn path survive in a
-            browser.
-          </p>
-          <p>
-            Pipeline layout, converter flags, and parity commands live on
-            <a href="./how-it-works.html">how it works</a>.
-          </p>
-        </section>
-      </article>
-
-      <p class="article-foot">
-        <a href="./">← Back to the demo</a>
-      </p>
-    </main>
+    <p>
+      Moved to <a href="./compare.html">compare.html</a>.
+    </p>
   </body>
 </html>

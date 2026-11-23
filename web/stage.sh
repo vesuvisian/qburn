@@ -5,7 +5,8 @@
 #   bash web/stage.sh
 #   bash web/stage.sh /path/to/alternate/pkg
 #
-# Output: web/dist/{index.html,engineering.html,how-it-works.html,demo.js,demo.css,worker.js,pkg/...}
+# Output: web/dist/{index.html,demo.html,tjs.html,architecture.html,compare.html,
+#   demo.js,tjs.js,demo.css,worker.js,tjs-worker.js,tjs-infer.js,pkg/...}
 # Preview: python3 web/preview.py
 # Local weights: python3 web/preview.py --weights weights/burnpack-q4
 #   (serves burnpacks at /weights/; does not copy them into dist)

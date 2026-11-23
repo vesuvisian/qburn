@@ -4,11 +4,22 @@
 
 # qburn
 
-Run [Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) with Burn (`0.23.0-pre.2`): hand-written vision and language modules, a native CLI, and a WebGPU browser demo that shares the same crate.
+[Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) on Burn (`0.23.0-pre.2`) — hand-written vision and language modules, a native CLI, and a WebGPU browser demo that share the same crate. No ONNX in the middle.
 
-You pass an image and a short prompt; the model streams a caption. Nothing here wraps ONNX Runtime or transformers.js — the stack is Burn end to end. Architecture notes: [how it works](web/static/how-it-works.html). Why not the ONNX path: [engineering](web/static/engineering.html).
+Drop in a photo, ask for a description, and the model streams a caption. Try it live at [vesuvisian.github.io/qburn](https://vesuvisian.github.io/qburn/), or read the [architecture](web/static/architecture.html) and [Burn vs transformers.js](web/static/compare.html) notes.
 
 Weights are not in git. Convert Hugging Face safetensors to burnpack shards offline, then host them on the Hub (or any CORS-enabled origin).
+
+## Contents
+
+- [Layout](#layout)
+- [Setup](#setup)
+- [GPU backends](#gpu-backends)
+- [CLI](#cli)
+- [Browser demo](#browser-demo)
+- [Comparison (transformers.js)](#comparison-transformersjs)
+- [Parity / testing](#parity--testing)
+- [Implementation notes](#implementation-notes)
 
 ## Layout
 
@@ -16,42 +27,17 @@ Weights are not in git. Convert Hugging Face safetensors to burnpack shards offl
 crates/qburn/          Model, preprocess, generate, CLI
 crates/converter/      HF safetensors → quantized .bpk shards + manifest.json
 web/                   wasm-bindgen crate (WebGPU)
-web/static/            Demo UI + engineering / how-it-works pages
+web/static/            Intro, demos, architecture, compare
+                       index · demo · tjs · architecture · compare
 web/pkg/               wasm-pack output (gitignored; built in CI / locally)
 patches/               cubecl-runtime patch for wasm Burn 0.23
 .github/workflows/     GitHub Pages deploy
-scripts/               HF logits dump for parity checks
+scripts/               HF logits dump; transformers.js Node CLI (`tjs-cli/`)
 tests/parity/          Optional reference dumps
 weights/               Local HF checkout + burnpacks (gitignored)
 ```
 
-## GPU backends
-
-The library, CLI, and wasm demo share feature flags. The CLI default is `wgpu` + `cli` + `autotune` (GPU features also pull in `burn/fusion`).
-
-| Feature | Backend | Notes |
-|---------|---------|--------|
-| `wgpu` (default) | Burn wgpu | Cross-platform GPU. On macOS this usually rides Metal *through* wgpu; Burn 0.23 may see ~32 KiB shared memory and pick slower matmuls than native `metal`. |
-| `metal` | Burn CubeCL Metal | Native Metal (`Device::metal`) + fusion + autotune. Prefer on Apple Silicon. |
-| `wgpu-msl` | Burn wgpu → MSL | wgpu compiling to Metal shading language; usually still slower than `metal`. |
-| `cuda` | Burn CubeCL CUDA | Native CUDA (`Device::cuda(0)`) + fusion + autotune. |
-| `flex` | Burn flex | CPU only — fine for tiny smoke tests, not for this VLM. |
-| `webgpu` | Burn webgpu / WGSL | Browser WebGPU. No fusion, no autotune. Used by `web/`. |
-| `autotune` | — | Kernel autotune. On by default for native; omit for wasm. |
-| `cli` | — | Builds the `qburn` binary (`clap`). |
-
-Always use `--release` for real inference. After a Burn upgrade the first run may re-autotune; later runs reuse the cache.
-
-```bash
-# Default wgpu CLI
-cargo run -p qburn --release -- prompt --model weights/Qwen3-VL-2B-Instruct "Hello"
-
-# Native Metal (macOS) — usually faster than default wgpu on Apple Silicon
-cargo run -p qburn --release --no-default-features --features metal,cli -- \
-  describe --model weights/burnpack-q4-mix photo.jpg
-```
-
-## Setup: download + convert weights
+## Setup
 
 1. Get a local checkout of `Qwen/Qwen3-VL-2B-Instruct` (`config.json`, `tokenizer.json`, `model.safetensors`, …), or let the converter download it.
 2. Convert to burnpack shards with [`qburn-converter`](crates/converter):
@@ -89,6 +75,32 @@ weights/burnpack-q4-mix/
 ├── model-q4-mix-00000-of-00004.bpk.part
 ├── …
 └── model-q4-mix-00003-of-00004.bpk.part
+```
+
+## GPU backends
+
+The library, CLI, and wasm demo share feature flags. The CLI default is `wgpu` + `cli` + `autotune` (GPU features also pull in `burn/fusion`).
+
+| Feature | Backend | Notes |
+|---------|---------|--------|
+| `wgpu` (default) | Burn wgpu | Cross-platform GPU. On macOS this usually rides Metal *through* wgpu; Burn 0.23 may see ~32 KiB shared memory and pick slower matmuls than native `metal`. |
+| `metal` | Burn CubeCL Metal | Native Metal (`Device::metal`) + fusion + autotune. Prefer on Apple Silicon. |
+| `wgpu-msl` | Burn wgpu → MSL | wgpu compiling to Metal shading language; usually still slower than `metal`. |
+| `cuda` | Burn CubeCL CUDA | Native CUDA (`Device::cuda(0)`) + fusion + autotune. |
+| `flex` | Burn flex | CPU only — fine for tiny smoke tests, not for this VLM. |
+| `webgpu` | Burn webgpu / WGSL | Browser WebGPU. No fusion, no autotune. Used by `web/`. |
+| `autotune` | — | Kernel autotune. On by default for native; omit for wasm. |
+| `cli` | — | Builds the `qburn` binary (`clap`). |
+
+Always use `--release` for real inference. After a Burn upgrade the first run may re-autotune; later runs reuse the cache.
+
+```bash
+# Default wgpu CLI
+cargo run -p qburn --release -- prompt --model weights/Qwen3-VL-2B-Instruct "Hello"
+
+# Native Metal (macOS) — usually faster than default wgpu on Apple Silicon
+cargo run -p qburn --release --no-default-features --features metal,cli -- \
+  describe --model weights/burnpack-q4-mix photo.jpg
 ```
 
 ## CLI
@@ -178,13 +190,11 @@ cargo run -p qburn --release -- config
 
 ## Browser demo
 
-The page under `web/static/` loads wasm from `web/` (Burn `webgpu` via wasm-bindgen). A Web Worker owns the model so the UI stays responsive; tokens stream back with `postMessage`. Extra pages: [engineering](web/static/engineering.html), [how it works](web/static/how-it-works.html).
+Live: [vesuvisian.github.io/qburn](https://vesuvisian.github.io/qburn/) (intro at `/`, Burn demo at [`/demo.html`](https://vesuvisian.github.io/qburn/demo.html)). Narrative for the pipeline and quant choices lives in [architecture](web/static/architecture.html); keep this section for local build/preview.
 
-WebGPU is required — without `navigator.gpu` the page errors out (no CPU fallback for this model). Weights come from a burnpack `manifest.json` (Hub by default, or local — see below). Shards are fetched in order, concatenated, and cached for reloads.
+The Burn page loads wasm from `web/` (Burn `webgpu` via wasm-bindgen). A Web Worker owns the model so the UI stays responsive; tokens stream back with `postMessage`. WebGPU is required — no CPU fallback. Weights come from a burnpack `manifest.json` (Hub by default, or local — see below). Prefer `q4-mix` (~1.8 GiB); uniform `q4` is smaller. Temperature defaults to `0` (greedy).
 
-Prefer `q4-mix` (~1.8 GiB) for quality; uniform `q4` (~1.3 GiB) is smaller. Fp16/fp32 packs are too large for typical wasm32 heaps once expanded. Temperature defaults to `0` (greedy) in the UI.
-
-Expect the browser path to be much slower than the CLI. Shared memory on WebGPU is often ~32 KiB, and Burn’s hardware-aware CubeCL path has to live with that (see [patches/](patches/README.md)). A short caption can take a minute or more. Serve over `http://localhost` — `file://` will not load wasm.
+Expect the browser path to be much slower than the CLI (often a minute for a short caption). Shared memory on WebGPU is often ~32 KiB (see [patches/](patches/README.md)). Serve over `http://localhost` — `file://` will not load wasm.
 
 Manifest resolution: `?manifest=` → `window.QBURN_MANIFEST` → `./weights/manifest.json` (local preview) → Hub default.
 
@@ -218,7 +228,7 @@ python3 web/preview.py --weights   # auto-pick local burnpack dir
 
 `preview.py` uses a threaded HTTP server so large shard transfers do not stall the SPA, and sets `application/wasm` for `.wasm` files.
 
-After changing only `web/static/*`, re-run `bash web/stage.sh`. After changing `web/src`, `crates/qburn`, or `patches/`, re-run `wasm-pack` then `stage.sh`. Convert HF weights before using `--weights` (see [Setup](#setup-download--convert-weights)).
+After changing only `web/static/*`, re-run `bash web/stage.sh`. After changing `web/src`, `crates/qburn`, or `patches/`, re-run `wasm-pack` then `stage.sh`. Convert HF weights before using `--weights` (see [Setup](#setup)).
 
 Override the manifest without the preview flag via `?manifest=…` or:
 
@@ -231,7 +241,41 @@ Override the manifest without the preview flag via `?manifest=…` or:
 
 ### GitHub Pages
 
-Set the repo’s Pages source to **GitHub Actions**. [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) builds the WebGPU wasm pack, stages `web/dist`, rejects any artifact file ≥100 MB, and deploys. Model weights stay on the Hub — only the SPA + wasm ship with Pages.
+Deployed site: [vesuvisian.github.io/qburn](https://vesuvisian.github.io/qburn/). Set the repo’s Pages source to **GitHub Actions**. [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) builds the WebGPU wasm pack, stages `web/dist`, rejects any artifact file ≥100 MB, and deploys. Model weights stay on the Hub — only the SPA + wasm ship with Pages.
+
+## Comparison (transformers.js)
+
+Side-by-side checks against Burn. Stack rationale: [compare](web/static/compare.html). Same ONNX model and shared helpers in [`web/static/tjs-infer.js`](web/static/tjs-infer.js) — not Burn.
+
+### Browser page
+
+[`web/static/tjs.html`](web/static/tjs.html) (live: [`/tjs.html`](https://vesuvisian.github.io/qburn/tjs.html)) runs the caption job through [@huggingface/transformers](https://huggingface.co/docs/transformers.js) (CDN) and ONNX Runtime WebGPU. It loads [`onnx-community/Qwen3-VL-2B-Instruct-ONNX`](https://huggingface.co/onnx-community/Qwen3-VL-2B-Instruct-ONNX) from the Hub (`?model=` overrides the id). No `wasm-pack` build is required; after editing `web/static/*`, re-stage and open `/tjs.html`.
+
+### Node CLI
+
+Local twin of the browser page (`prompt` + `describe`):
+
+```bash
+cd scripts/tjs-cli && npm install
+# from repo root:
+node scripts/tjs-cli/bin.mjs prompt --stream --max-tokens 64 "Say hello in one sentence."
+node scripts/tjs-cli/bin.mjs describe --metrics path/to/photo.jpg
+```
+
+| Flag / command | Notes |
+|----------------|--------|
+| `prompt` / `describe` | Same verbs as the Burn CLI. |
+| `--model <id\|path>` | Default Hub id `onnx-community/Qwen3-VL-2B-Instruct-ONNX`; local ONNX checkout also works. |
+| `--device <name>` | Default `webgpu` (same as the browser page). Use `--device cpu` if WebGPU is unavailable. |
+| `--max-tokens <N>` | Generation budget (default `128`). |
+| `--temperature <F>` | Softmax temperature; `0` = greedy (default). |
+| `--metrics` | Print TTFT / total / decode tok/s to stderr. |
+| `describe --prompt` | Caption instruction (default `Describe this scene.`). |
+| `describe -r` | Recurse when expanding directories. |
+| `prompt --system` | System message (default `You are a helpful assistant.`). |
+| `prompt --stream` | Stream tokens to stdout as they arrive. |
+
+First run downloads/caches the ONNX weights. Defaults match the browser page (`webgpu` + the shared `q4f16` dtype mix). Fall back with `--device cpu` on machines without WebGPU. `prompt` attaches a tiny placeholder image because this ONNX VL export expects vision inputs (Burn’s text-only path does not).
 
 ## Parity / testing
 
