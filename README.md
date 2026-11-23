@@ -132,20 +132,24 @@ cargo run -p qburn --release -- prompt \
 
 ### `describe` — scene description
 
-Loads the model once, then captions each image. Tokens always stream to stdout.
+Loads the model once, then captions each image (or all images in one prompt with `--together`), or describes a **single video** (Qwen3-VL timestamped `<|video_pad|>` blocks). Tokens always stream to stdout.
 
 | Flag / arg | Default | Description |
 |------------|---------|-------------|
 | `--model <DIR>` | required | HF or burnpack directory. |
-| `<PATHS>…` | required | Image files and/or directories. |
-| `-r`, `--recursive` | off | Recurse when expanding folders. |
+| `<PATHS>…` | required | Image files and/or directories, or one video. |
+| `-r`, `--recursive` | off | Recurse when expanding folders (images only). |
+| `--together` | off | One multi-image prompt over all paths (default: caption each file). Image-only. |
+| `--video` | off | Treat the single path as one video (container or ordered frame directory). |
+| `--fps <F>` | `2` | Sample this many frames per second (video only; exclusive with `--num-frames`). |
+| `--num-frames <N>` | — | Sample exactly N frames (video only; exclusive with `--fps`). Max 16. |
 | `--prompt <TEXT>` | `Describe this scene.` | Caption instruction. |
 | `--max-tokens <N>` | `128` | Generation budget. |
 | `--temperature <F>` | `0` | Softmax temperature; `0` = greedy. |
 | `--metrics` | off | Phase timings on stderr (below). |
 | `--probe` | off | Dump prefill first-token top-10 logits to stderr. |
 
-Directories contribute PNG/JPEG/WebP files (non-recursive unless `--recursive`). Explicit file paths are always queued.
+Directories contribute PNG/JPEG/WebP files (non-recursive unless `--recursive`). Explicit file paths are always queued. Video containers (`mp4`, `webm`, `mov`, `mkv`, `avi`) require `ffmpeg` on `PATH` (and prefer `ffprobe`). Frame folders use `--video` and skip ffmpeg. Caps: min 4 frames, max 16. Spatial resolution uses the HF video pixel budget (`t×h×w`), so longer clips shrink instead of stacking full-res frames. Do not mix images and video in one invoke.
 
 With `--metrics`, stderr reports:
 
@@ -173,11 +177,32 @@ cargo run -p qburn --release -- describe \
   --metrics \
   a.jpg b.jpg photos/
 
+# Multi-image in one prompt (order = path expansion order)
+cargo run -p qburn --release -- describe \
+  --model weights/Qwen3-VL-2B-Instruct \
+  --together \
+  --prompt "What changed between these photos?" \
+  before.jpg after.jpg
+
 # Same quantization as the browser demo
 cargo run -p qburn --release -- describe \
   --model weights/burnpack-q4-mix \
   --prompt "Describe this scene." \
   path/to/photo.jpg
+
+# Single video (ffmpeg on PATH)
+cargo run -p qburn --release -- describe \
+  --model weights/burnpack-q4-mix \
+  --fps 2 \
+  --prompt "What happens in this clip?" \
+  clip.mp4
+
+# Ordered frame directory as one video
+cargo run -p qburn --release -- describe \
+  --model weights/burnpack-q4-mix \
+  --video \
+  --num-frames 8 \
+  frames/
 ```
 
 ### `config`
@@ -192,7 +217,9 @@ cargo run -p qburn --release -- config
 
 Live: [vesuvisian.github.io/qburn](https://vesuvisian.github.io/qburn/) (intro at `/`, Burn demo at [`/demo.html`](https://vesuvisian.github.io/qburn/demo.html)). Narrative for the pipeline and quant choices lives in [architecture](web/static/architecture.html); keep this section for local build/preview.
 
-The Burn page loads wasm from `web/` (Burn `webgpu` via wasm-bindgen). A Web Worker owns the model so the UI stays responsive; tokens stream back with `postMessage`. WebGPU is required — no CPU fallback. Weights come from a burnpack `manifest.json` (Hub by default, or local — see below). Prefer `q4-mix` (~1.8 GiB); uniform `q4` is smaller. Temperature defaults to `0` (greedy).
+The Burn page loads wasm from `web/` (Burn `webgpu` via wasm-bindgen). A Web Worker owns the model so the UI stays responsive; tokens stream back with `postMessage`. WebGPU is required — no CPU fallback. Weights come from a burnpack `manifest.json` (Hub by default, or local — see below). Prefer `q4-mix` (~1.8 GiB); uniform `q4` is smaller. Temperature defaults to `0` (greedy). Upload up to **4 images** for one multi-image prompt, **or one video** (**exactly 4** sampled frames, exclusive with images). The transformers.js page matches those limits.
+
+**Video frame vs resolution tradeoff.** Qwen3-VL’s video `smart_resize` budgets pixels over `t×h×w`. More sampled frames shrink each frame spatially. The browser demos fix **4 frames** (`grid_t = 2` after `temporal_patch_size=2`) so captions stay spatially sharp under WebGPU latency; sampling 8 at 2 fps tends to crush detail into vague “abstract” captions. The CLI still exposes `--fps` / `--num-frames` (min 4, max 16) when you want more temporal coverage and accept smaller frames. Architecture notes: [architecture](web/static/architecture.html).
 
 Expect the browser path to be much slower than the CLI (often a minute for a short caption). Shared memory on WebGPU is often ~32 KiB (see [patches/](patches/README.md)). Serve over `http://localhost` — `file://` will not load wasm.
 
@@ -272,10 +299,13 @@ node scripts/tjs-cli/bin.mjs describe --metrics path/to/photo.jpg
 | `--metrics` | Print TTFT / total / decode tok/s to stderr. |
 | `describe --prompt` | Caption instruction (default `Describe this scene.`). |
 | `describe -r` | Recurse when expanding directories. |
+| `describe --together` | One multi-image prompt over all paths (default: caption each file). |
+| `describe --video` | Single video: container file or ordered frame directory (`ffmpeg` for containers). |
+| `describe --fps` / `--num-frames` | Video sampling (default 2 fps; max 16 frames). |
 | `prompt --system` | System message (default `You are a helpful assistant.`). |
 | `prompt --stream` | Stream tokens to stdout as they arrive. |
 
-First run downloads/caches the ONNX weights. Defaults match the browser page (`webgpu` + the shared `q4f16` dtype mix). Fall back with `--device cpu` on machines without WebGPU. `prompt` attaches a tiny placeholder image because this ONNX VL export expects vision inputs (Burn’s text-only path does not).
+First run downloads ONNX weights into `weights/tjs-cache/` (gitignored; override with `QBURN_TJS_CACHE` or `TRANSFORMERS_CACHE`). Later runs reuse that cache instead of re-fetching from the Hub. Defaults match the browser page (`webgpu` + the shared `q4f16` dtype mix). Fall back with `--device cpu` on machines without WebGPU. `prompt` attaches a tiny placeholder image because this ONNX VL export expects vision inputs (Burn’s text-only path does not).
 
 ## Parity / testing
 

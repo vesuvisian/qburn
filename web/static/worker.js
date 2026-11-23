@@ -4,7 +4,8 @@
  * Expects `./pkg/qburn_web.js` from wasm-pack (staged next to this file via
  * `bash web/stage.sh`). Messages from the main thread:
  *   { type: "init", manifestUrl }
- *   { type: "describe", imageBytes, prompt, maxTokens, temperature }
+ *   { type: "describe", imageBytesList, prompt, maxTokens, temperature }
+ *   { type: "describe_video", frameBytesList, timestamps, prompt, maxTokens, temperature }
  * Replies: progress | ready | token | done | error
  */
 
@@ -49,19 +50,55 @@ async function init(manifestUrl) {
   });
 }
 
-async function describe(imageBytes, prompt, maxTokens, temperature, probe) {
+function toUint8List(list) {
+  const arr = Array.isArray(list) ? list : [list];
+  return arr.map((imageBytes) =>
+    imageBytes instanceof ArrayBuffer ? new Uint8Array(imageBytes) : imageBytes
+  );
+}
+
+async function describe(imageBytesList, prompt, maxTokens, temperature, probe) {
   if (!app) {
     postMessage({ type: "error", message: "model not ready" });
     return;
   }
-  // Accept transferred ArrayBuffer or Uint8Array from the main thread.
-  const bytes =
-    imageBytes instanceof ArrayBuffer ? new Uint8Array(imageBytes) : imageBytes;
+  const images = toUint8List(imageBytesList);
   const onToken = (piece) => {
     postMessage({ type: "token", text: piece });
   };
   const full = await app.describe(
-    bytes,
+    images,
+    prompt,
+    maxTokens,
+    temperature,
+    !!probe,
+    onToken
+  );
+  postMessage({ type: "done", text: full });
+}
+
+async function describeVideo(
+  frameBytesList,
+  timestamps,
+  prompt,
+  maxTokens,
+  temperature,
+  probe
+) {
+  if (!app) {
+    postMessage({ type: "error", message: "model not ready" });
+    return;
+  }
+  const frames = toUint8List(frameBytesList);
+  const times = Float64Array.from(
+    Array.isArray(timestamps) ? timestamps : []
+  );
+  const onToken = (piece) => {
+    postMessage({ type: "token", text: piece });
+  };
+  const full = await app.describeVideo(
+    frames,
+    times,
     prompt,
     maxTokens,
     temperature,
@@ -78,7 +115,16 @@ onmessage = async (ev) => {
       await init(msg.manifestUrl);
     } else if (msg.type === "describe") {
       await describe(
-        msg.imageBytes,
+        msg.imageBytesList ?? msg.imageBytes,
+        msg.prompt,
+        msg.maxTokens ?? 128,
+        msg.temperature ?? 0,
+        msg.probe ?? false
+      );
+    } else if (msg.type === "describe_video") {
+      await describeVideo(
+        msg.frameBytesList,
+        msg.timestamps,
         msg.prompt,
         msg.maxTokens ?? 128,
         msg.temperature ?? 0,

@@ -45,6 +45,9 @@ impl<F: TuneInputs, Out: AutotuneOutput> TuneFn<F, Out> {
     ///
     /// Expects to already hold exclusive device access; the adaptive driver takes it once for
     /// the whole round robin rather than once per candidate.
+    ///
+    /// Adaptive schedule only — not called from the wasm fixed-sample path.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn warmup_once<'a>(
         &self,
         inputs: <F as TuneInputs>::At<'a>,

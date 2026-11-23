@@ -56,12 +56,18 @@
         </div>
 
         <label class="drop" id="dropZone" for="fileInput">
-          <input id="fileInput" type="file" accept="image/*" hidden />
-          <span>Drop an image here, or click to upload</span>
+          <input
+            id="fileInput"
+            type="file"
+            accept="image/*,video/*"
+            multiple
+            hidden
+          />
+          <span>Drop 1 video or up to 4 images, or click to upload</span>
         </label>
 
         <div class="preview-row">
-          <img id="preview" alt="" class="preview hidden" />
+          <div id="thumbs" class="thumbs" aria-label="Selected media"></div>
           <div class="controls">
             <label class="prompt-label" for="prompt">Prompt</label>
             <input

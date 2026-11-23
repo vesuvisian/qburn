@@ -1,7 +1,22 @@
-use alloc::vec::Vec;
 use core::time::Duration;
+use cubecl_common::profile::ProfileTicks;
+#[cfg(not(target_family = "wasm"))]
+use alloc::vec::Vec;
+#[cfg(not(target_family = "wasm"))]
 use cubecl_common::benchmark::{BenchmarkComputations, BenchmarkDurations};
-use cubecl_common::profile::{ProfileTicks, TimingMethod};
+#[cfg(not(target_family = "wasm"))]
+use cubecl_common::profile::TimingMethod;
+
+/// A resolved sample's time, or `None` where it is no time: unmeasured, or zero. No launch that
+/// ran takes zero; a zero is a window that timed nothing, such as a candidate whose kernel never
+/// launched, and recorded it would be the fastest sample in the round and end it on the spot.
+///
+/// Kept available on wasm: `resolve_bench` filters samples through this helper on every target.
+pub(crate) fn measured(ticks: Option<ProfileTicks>) -> Option<Duration> {
+    ticks
+        .map(|ticks| ticks.duration())
+        .filter(|duration| !duration.is_zero())
+}
 
 /// The timings collected for one candidate, plus the small amount of state needed to decide
 /// whether it is still worth sampling.
@@ -9,21 +24,16 @@ use cubecl_common::profile::{ProfileTicks, TimingMethod};
 /// `BenchmarkComputations::score` is not usable while tuning is in flight: at a single sample the
 /// variance is zero and reads as perfect stability. This tracks the sample count explicitly so
 /// elimination can require evidence instead of inferring it from a degenerate variance.
+///
+/// Native adaptive schedule / patience only — not referenced from the wasm fixed-sample path.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Default)]
 pub(crate) struct SampleSet {
     durations: Vec<Duration>,
     stalled: u8,
 }
 
-/// A resolved sample's time, or `None` where it is no time: unmeasured, or zero. No launch that
-/// ran takes zero; a zero is a window that timed nothing, such as a candidate whose kernel never
-/// launched, and recorded it would be the fastest sample in the round and end it on the spot.
-pub(crate) fn measured(ticks: Option<ProfileTicks>) -> Option<Duration> {
-    ticks
-        .map(|ticks| ticks.duration())
-        .filter(|duration| !duration.is_zero())
-}
-
+#[cfg(not(target_family = "wasm"))]
 impl SampleSet {
     pub(crate) fn push(&mut self, duration: Duration) {
         let before = self.best();
@@ -99,6 +109,7 @@ impl SampleSet {
 }
 
 /// How a time compares to a baseline, once noise is set aside.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TimeChange {
     /// Faster than the baseline by more than the [`IMPROVEMENT_THRESHOLD`].
@@ -109,6 +120,7 @@ pub(crate) enum TimeChange {
     Regression,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl TimeChange {
     /// How `time` compares to `baseline`.
     pub(crate) fn of(time: Duration, baseline: Duration) -> Self {
@@ -123,11 +135,14 @@ impl TimeChange {
 }
 
 /// Total samples required before the warmup-biased first sample is discarded.
+#[cfg(not(target_family = "wasm"))]
 const DISCARD_THRESHOLD: usize = 3;
 /// Relative change a time must exceed to count as an improvement or a regression rather than
 /// noise.
+#[cfg(not(target_family = "wasm"))]
 const IMPROVEMENT_THRESHOLD: f64 = 0.02;
 /// Consecutive non-improving samples before a candidate is considered converged.
+#[cfg(not(target_family = "wasm"))]
 const CONVERGENCE_ROUNDS: u8 = 2;
 
 #[cfg(test)]
@@ -147,6 +162,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn set(durations: impl IntoIterator<Item = u64>) -> SampleSet {
         let mut set = SampleSet::default();
         for millis in durations {
@@ -155,6 +171,7 @@ mod tests {
         set
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn keeps_every_sample_below_the_discard_threshold() {
         assert_eq!(
@@ -163,6 +180,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn drops_the_warmup_biased_first_sample_once_enough_remain() {
         // The first sample is the fastest here, so dropping it has to move `best` upward:
@@ -172,6 +190,7 @@ mod tests {
         assert_eq!(set.best(), Some(Duration::from_millis(20)));
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn converges_after_consecutive_non_improving_samples() {
         // Gains under the 2% epsilon do not count as progress. The third push only shifts the
@@ -184,6 +203,7 @@ mod tests {
         assert!(set.converged());
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn aging_out_the_biased_sample_does_not_count_as_a_stall() {
         // The first sample is the fastest, so dropping it raises `best`. That is the window
@@ -196,6 +216,7 @@ mod tests {
         assert!(set.converged());
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn a_real_improvement_resets_convergence() {
         let mut set = set([20, 20, 20, 20, 20]);
@@ -204,6 +225,7 @@ mod tests {
         assert!(!set.converged());
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn short_circuit_needs_independent_confirmations() {
         let limit = Duration::from_millis(10);
@@ -213,6 +235,7 @@ mod tests {
         assert!(set([5, 50, 6]).confirmed_under(limit, 2));
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn computation_is_built_from_the_reliable_samples_only() {
         let set = set([1, 20, 30]);
@@ -221,6 +244,7 @@ mod tests {
         assert_eq!(computation.max, Duration::from_millis(30));
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn empty_set_has_no_best() {
         let set = SampleSet::default();

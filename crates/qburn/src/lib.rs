@@ -2,8 +2,8 @@
 //!
 //! # Overview
 //!
-//! Hand-written modules for **Qwen3-VL-2B-Instruct**: image preprocess → vision
-//! encoder → multimodal splice + M-RoPE → Qwen3 decoder with KV cache.
+//! Hand-written modules for **Qwen3-VL-2B-Instruct**: image / video preprocess →
+//! vision encoder → multimodal splice + M-RoPE → Qwen3 decoder with KV cache.
 //!
 //! - Native: enable a GPU feature (`wgpu`, `metal`, `cuda`) plus `cli` for the binary.
 //! - Browser: the `web` crate enables `webgpu`, calls [`resolve_device_async`], then
@@ -33,7 +33,10 @@ pub use config::Qwen3VlConfig;
 pub use device::{backend_name, resolve_device, resolve_device_async};
 pub use quant::WeightQuant;
 pub use tokenizer::QburnTokenizer;
-pub use vision::{ImageInput, ImageProcessor};
+pub use vision::{
+    sample_frame_indices, temporal_group_timestamps, ImageInput, ImageProcessor, VIDEO_DEFAULT_FPS,
+    VIDEO_MAX_FRAMES_CLI, VIDEO_MAX_FRAMES_WEB, VIDEO_MIN_FRAMES,
+};
 pub use vl::{with_length_budget, DescribeTimings, PrefillProbe, Qwen3Vl};
 
 pub use burn::prelude::Device;

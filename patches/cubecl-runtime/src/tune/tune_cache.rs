@@ -313,6 +313,8 @@ impl<K: AutotuneKey> TuneCache<K> {
         )
     }
 
+    /// Native adaptive path only — wasm never marks a service lost.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn mark_lost(&mut self, service: ServiceId) {
         if !self.lost.contains(&service) {
             self.lost.push(service);

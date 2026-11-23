@@ -16,7 +16,10 @@ use futures::future::{try_join, try_join_all};
 use qburn::load::{bytes_from_vec, load_from_burnpack_bytes};
 use qburn::tokenizer::QburnTokenizer;
 use qburn::vision::ImageProcessor;
-use qburn::{resolve_device_async, PrefillProbe, Qwen3Vl, Qwen3VlConfig, WeightQuant};
+use qburn::{
+    resolve_device_async, temporal_group_timestamps, PrefillProbe, Qwen3Vl, Qwen3VlConfig,
+    WeightQuant, VIDEO_MAX_FRAMES_WEB, VIDEO_MIN_FRAMES,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
@@ -277,14 +280,15 @@ impl QburnApp {
         Ok(QburnApp)
     }
 
-    /// Describe an uploaded image; streams pieces via `on_token`.
+    /// Describe one or more uploaded images; streams pieces via `on_token`.
     ///
-    /// `temperature <= 0` is greedy argmax; `> 0` samples with softmax.
-    /// Set `probe` to dump prefill top-k (extra GPU readback — off by default).
+    /// `images` is a JS array of `Uint8Array` (1..=4). `temperature <= 0` is
+    /// greedy argmax; `> 0` samples with softmax. Set `probe` to dump prefill
+    /// top-k (extra GPU readback — off by default).
     #[wasm_bindgen]
     pub async fn describe(
         &self,
-        image_bytes: Vec<u8>,
+        images: js_sys::Array,
         prompt: String,
         max_tokens: usize,
         temperature: f32,
@@ -308,14 +312,35 @@ impl QburnApp {
         })?;
 
         let result = async {
-            let img = processor
-                .preprocess_bytes(&image_bytes)
-                .map_err(|e| JsValue::from_str(&e))?;
+            let n = images.length() as usize;
+            if n == 0 {
+                return Err(JsValue::from_str("describe requires at least one image"));
+            }
+            if n > 4 {
+                return Err(JsValue::from_str(
+                    "browser demo supports at most 4 images per prompt",
+                ));
+            }
+
+            let mut imgs = Vec::with_capacity(n);
+            let mut merge_counts = Vec::with_capacity(n);
+            let mut grids = Vec::with_capacity(n);
+            for i in 0..n {
+                let u8a = js_sys::Uint8Array::new(&images.get(i as u32));
+                let mut buf = vec![0u8; u8a.length() as usize];
+                u8a.copy_to(&mut buf);
+                let img = processor
+                    .preprocess_bytes(&buf)
+                    .map_err(|e| JsValue::from_str(&e))?;
+                grids.push(img.grid_thw);
+                merge_counts.push(img.num_merge_tokens);
+                imgs.push(img);
+            }
 
             let prompt = qburn::with_length_budget(&prompt, max_tokens);
-            let chat = tokenizer.apply_vl_chat_template(
+            let chat = tokenizer.apply_vl_chat_template_multi(
                 &prompt,
-                img.num_merge_tokens,
+                &merge_counts,
                 "<|vision_start|>",
                 "<|image_pad|>",
                 "<|vision_end|>",
@@ -326,9 +351,10 @@ impl QburnApp {
 
             web_sys::console::log_1(
                 &format!(
-                    "describe: grid={:?} merge_tokens={} prompt_tokens={}",
-                    img.grid_thw,
-                    img.num_merge_tokens,
+                    "describe: images={} grids={:?} merge_tokens={:?} prompt_tokens={}",
+                    n,
+                    grids,
+                    merge_counts,
                     ids.len()
                 )
                 .into(),
@@ -346,7 +372,166 @@ impl QburnApp {
             let _tokens = model
                 .describe_greedy(
                     &ids,
-                    &img,
+                    &imgs,
+                    max_tokens,
+                    temperature,
+                    &device,
+                    Some(&mut cb),
+                    None,
+                    probe_slot,
+                )
+                .await;
+
+            if probe {
+                let greedy_piece = tokenizer
+                    .decode(&[probe_buf.greedy_id])
+                    .unwrap_or_else(|_| "?".into());
+                let topk_fmt: Vec<String> = probe_buf
+                    .topk
+                    .iter()
+                    .map(|(id, logit)| {
+                        let piece = tokenizer.decode(&[*id]).unwrap_or_else(|_| "?".into());
+                        format!("{id}:{logit:.4}:{piece:?}")
+                    })
+                    .collect();
+                web_sys::console::log_1(
+                    &format!(
+                        "prefill probe: backend=webgpu greedy_id={} greedy={:?} topk=[{}]",
+                        probe_buf.greedy_id,
+                        greedy_piece,
+                        topk_fmt.join(", ")
+                    )
+                    .into(),
+                );
+            }
+
+            Ok::<_, JsValue>(out)
+        }
+        .await;
+
+        APP.with(|slot| {
+            *slot.borrow_mut() = Some(AppState {
+                model,
+                tokenizer,
+                processor,
+                device,
+                quant_label,
+            });
+        });
+        result
+    }
+
+    /// Describe a single video from sampled frame image bytes; streams via `on_token`.
+    ///
+    /// `frames` is a JS array of `Uint8Array` (PNG/JPEG/WebP), length
+    /// `VIDEO_MIN_FRAMES..=VIDEO_MAX_FRAMES_WEB` (odd counts are padded in
+    /// preprocess). `timestamps` is a parallel `Float64Array` of seek times in
+    /// seconds (Qwen3-VL text-timestamp prompt). Falls back to uniform 2 fps
+    /// times when empty.
+    #[wasm_bindgen(js_name = describeVideo)]
+    pub async fn describe_video(
+        &self,
+        frames: js_sys::Array,
+        timestamps: js_sys::Float64Array,
+        prompt: String,
+        max_tokens: usize,
+        temperature: f32,
+        probe: bool,
+        on_token: js_sys::Function,
+    ) -> Result<String, JsValue> {
+        let (model, tokenizer, processor, device, quant_label) = APP.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let app = slot
+                .take()
+                .ok_or_else(|| JsValue::from_str("call init() first"))?;
+            Ok::<_, JsValue>((
+                app.model,
+                app.tokenizer,
+                app.processor,
+                app.device,
+                app.quant_label,
+            ))
+        })?;
+
+        let result = async {
+            let n = frames.length() as usize;
+            if n < VIDEO_MIN_FRAMES {
+                return Err(JsValue::from_str(&format!(
+                    "describeVideo requires at least {VIDEO_MIN_FRAMES} frames"
+                )));
+            }
+            if n > VIDEO_MAX_FRAMES_WEB {
+                return Err(JsValue::from_str(&format!(
+                    "browser demo supports at most {VIDEO_MAX_FRAMES_WEB} video frames"
+                )));
+            }
+
+            let mut frame_bufs: Vec<Vec<u8>> = Vec::with_capacity(n);
+            for i in 0..n {
+                let u8a = js_sys::Uint8Array::new(&frames.get(i as u32));
+                let mut buf = vec![0u8; u8a.length() as usize];
+                u8a.copy_to(&mut buf);
+                frame_bufs.push(buf);
+            }
+            let refs: Vec<&[u8]> = frame_bufs.iter().map(|b| b.as_slice()).collect();
+            let video = processor
+                .preprocess_video_frame_bytes(&refs)
+                .map_err(|e| JsValue::from_str(&e))?;
+
+            let mut frame_times = timestamps.to_vec();
+            if frame_times.len() != n {
+                frame_times = (0..n).map(|i| i as f64 / 2.0).collect();
+            }
+            let (gt, gh, gw) = video.grid_thw;
+            let merge = processor.spatial_merge_size.max(1);
+            let tokens_per_group = (gh / merge) * (gw / merge);
+            let group_times =
+                temporal_group_timestamps(&frame_times, processor.temporal_patch_size.max(1));
+            if group_times.len() != gt {
+                return Err(JsValue::from_str(&format!(
+                    "timestamp groups {} != video grid_t {gt}",
+                    group_times.len()
+                )));
+            }
+
+            let prompt = qburn::with_length_budget(&prompt, max_tokens);
+            let chat = tokenizer.apply_vl_video_chat_template(
+                &prompt,
+                tokens_per_group,
+                &group_times,
+                "<|vision_start|>",
+                "<|video_pad|>",
+                "<|vision_end|>",
+            );
+            let ids = tokenizer
+                .encode(&chat)
+                .map_err(|e| JsValue::from_str(&e))?;
+
+            web_sys::console::log_1(
+                &format!(
+                    "describeVideo: frames={} grid={:?} merge_tokens={} timestamps={:?} prompt_tokens={}",
+                    n,
+                    video.grid_thw,
+                    video.num_merge_tokens,
+                    group_times,
+                    ids.len()
+                )
+                .into(),
+            );
+
+            let mut out = String::new();
+            let mut cb = |tid: u32| {
+                if let Ok(piece) = tokenizer.decode(&[tid]) {
+                    out.push_str(&piece);
+                    let _ = on_token.call1(&JsValue::NULL, &JsValue::from_str(&piece));
+                }
+            };
+            let mut probe_buf = PrefillProbe::default();
+            let probe_slot = probe.then_some(&mut probe_buf);
+            let _tokens = model
+                .describe_greedy(
+                    &ids,
+                    std::slice::from_ref(&video),
                     max_tokens,
                     temperature,
                     &device,

@@ -1,11 +1,26 @@
 //! Autoregressive generation helpers.
 
+use std::collections::HashSet;
+
 use burn::prelude::*;
 use burn::tensor::activation;
 
 use crate::model::{
     build_causal_mask, new_caches, AttentionKvCache, RotaryEmbedding, TextDecoder,
 };
+
+/// Soft repetition penalty for greedy multimodal decode (matches tjs demo).
+pub const GREEDY_REPETITION_PENALTY: f32 = 1.1;
+/// Ban completing an already-seen n-gram (0 = off).
+pub const GREEDY_NO_REPEAT_NGRAM: usize = 5;
+
+/// Qwen chat stop ids: `<|im_end|>`, `<|endoftext|>`, `<|im_start|>`.
+pub const QWEN_STOP_TOKEN_IDS: [u32; 3] = [151_645, 151_643, 151_644];
+
+/// True when `id` should end generation (EOS / turn boundary).
+pub fn is_stop_token(id: u32) -> bool {
+    QWEN_STOP_TOKEN_IDS.contains(&id)
+}
 
 /// Greedy / sampled generation over text-only prompts.
 ///
@@ -178,15 +193,42 @@ fn topk_cpu(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
 
 /// Async next-token selection — required on wasm (no sync GPU readback).
 pub async fn sample_next_async(logits: &Tensor<3>, temperature: f32) -> u32 {
+    sample_next_guarded_async(logits, temperature, &[], 1.0, 0).await
+}
+
+/// Like [`sample_next_async`], with optional greedy anti-loop guards.
+///
+/// When `temperature <= 0`, applies HF-style repetition penalty and
+/// `no_repeat_ngram_size` bans on the CPU logits row before argmax. Sampling
+/// (`temperature > 0`) leaves logits untouched (penalty/ngram ignored).
+pub async fn sample_next_guarded_async(
+    logits: &Tensor<3>,
+    temperature: f32,
+    generated: &[u32],
+    repetition_penalty: f32,
+    no_repeat_ngram_size: usize,
+) -> u32 {
     let last = last_logits_row(logits);
     if temperature <= 0.0 {
-        let idx = last.argmax(1);
-        let data = idx
+        let need_guard = (repetition_penalty - 1.0).abs() > f32::EPSILON
+            || no_repeat_ngram_size > 0;
+        if !need_guard {
+            let idx = last.argmax(1);
+            let data = idx
+                .into_data_async()
+                .await
+                .unwrap_or_else(|_| burn::tensor::TensorData::new(vec![0i32], [1]));
+            let v: Vec<i32> = data.try_to_vec().unwrap_or_else(|_| vec![0]);
+            return v[0] as u32;
+        }
+        let data = last
             .into_data_async()
             .await
-            .unwrap_or_else(|_| burn::tensor::TensorData::new(vec![0i32], [1]));
-        let v: Vec<i32> = data.try_to_vec().unwrap_or_else(|_| vec![0]);
-        return v[0] as u32;
+            .unwrap_or_else(|_| burn::tensor::TensorData::new(vec![0.0f32], [1]));
+        let mut row: Vec<f32> = data.try_to_vec().unwrap_or_else(|_| vec![0.0]);
+        apply_repetition_penalty(&mut row, generated, repetition_penalty);
+        ban_no_repeat_ngram(&mut row, generated, no_repeat_ngram_size);
+        return argmax_cpu(&row);
     }
 
     let scaled = last / temperature;
@@ -197,6 +239,64 @@ pub async fn sample_next_async(logits: &Tensor<3>, temperature: f32) -> u32 {
         .unwrap_or_else(|_| burn::tensor::TensorData::new(vec![1.0f32], [1]));
     let probs: Vec<f32> = data.try_to_vec().unwrap_or_else(|_| vec![1.0]);
     multinomial(&probs)
+}
+
+/// HF repetition penalty on a logits row (unique prior tokens).
+pub fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
+    if (penalty - 1.0).abs() <= f32::EPSILON || generated.is_empty() {
+        return;
+    }
+    let mut seen = HashSet::with_capacity(generated.len());
+    for &tok in generated {
+        if !seen.insert(tok) {
+            continue;
+        }
+        let i = tok as usize;
+        if i >= logits.len() {
+            continue;
+        }
+        if logits[i] < 0.0 {
+            logits[i] *= penalty;
+        } else {
+            logits[i] /= penalty;
+        }
+    }
+}
+
+/// Set logits of tokens that would complete a repeated `n`-gram to `-inf`.
+pub fn ban_no_repeat_ngram(logits: &mut [f32], generated: &[u32], n: usize) {
+    for tok in no_repeat_ngram_banned(generated, n) {
+        let i = tok as usize;
+        if i < logits.len() {
+            logits[i] = f32::NEG_INFINITY;
+        }
+    }
+}
+
+/// Tokens that would complete an already-seen `n`-gram in `generated`.
+pub fn no_repeat_ngram_banned(generated: &[u32], n: usize) -> Vec<u32> {
+    if n <= 1 || generated.len() < n - 1 {
+        return Vec::new();
+    }
+    let prefix_len = n - 1;
+    let prefix = &generated[generated.len() - prefix_len..];
+    let mut banned = Vec::new();
+    let last_start = generated.len().saturating_sub(prefix_len);
+    for i in 0..last_start {
+        if &generated[i..i + prefix_len] == prefix {
+            banned.push(generated[i + prefix_len]);
+        }
+    }
+    banned
+}
+
+fn argmax_cpu(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0)
 }
 
 /// Sync wrapper for native backends (`pollster`). Panics on wasm — use [`sample_next_async`].
@@ -283,5 +383,29 @@ mod tests {
         assert_eq!(top[0], (1, 5.0));
         assert_eq!(top[1], (3, 4.0));
         assert_eq!(top[2], (2, 2.0));
+    }
+
+    #[test]
+    fn no_repeat_ngram_bans_continuations() {
+        // After [a,b,c,d,e,a,b,c,d], n=5 bans e (would repeat a,b,c,d,e).
+        let tokens = vec![1, 2, 3, 4, 5, 1, 2, 3, 4];
+        let banned = no_repeat_ngram_banned(&tokens, 5);
+        assert!(banned.contains(&5));
+    }
+
+    #[test]
+    fn repetition_penalty_downweights_seen() {
+        let mut logits = vec![2.0f32, 3.0, 1.0];
+        apply_repetition_penalty(&mut logits, &[1], 1.1);
+        assert!((logits[1] - 3.0 / 1.1).abs() < 1e-5);
+        assert_eq!(logits[0], 2.0);
+    }
+
+    #[test]
+    fn stop_token_set_covers_qwen_chat() {
+        assert!(is_stop_token(151_645));
+        assert!(is_stop_token(151_643));
+        assert!(is_stop_token(151_644));
+        assert!(!is_stop_token(42));
     }
 }

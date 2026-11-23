@@ -8,6 +8,15 @@
 /** Long-edge resize so vision memory stays in a browser-friendly band. */
 export const MAX_IMAGE_EDGE = 448;
 
+/**
+ * HF Qwen3-VL video size budget (`shortest_edge` / `longest_edge` on the
+ * video processor). Applied to `t_bar * h_bar * w_bar` so token cost scales
+ * with clip length instead of spending a full image budget per frame.
+ */
+export const VIDEO_MIN_PIXELS = 128 * 32 * 32; // 131_072
+export const VIDEO_MAX_PIXELS = 32 * 32 * 768; // 786_432
+export const VIDEO_SPATIAL_FACTOR = 32; // patch_size 16 × merge_size 2
+
 export const DEFAULT_MODEL_ID = "onnx-community/Qwen3-VL-2B-Instruct-ONNX";
 
 /** Default dtype mix matching the WebGPU demo. */
@@ -26,6 +35,7 @@ export const DEFAULT_DTYPE = Object.freeze({
  * @param {typeof import("@huggingface/transformers").InterruptableStoppingCriteria} api.InterruptableStoppingCriteria
  * @param {typeof import("@huggingface/transformers").StoppingCriteriaList} api.StoppingCriteriaList
  * @param {typeof import("@huggingface/transformers").RawImage} [api.RawImage] — required for generatePrompt
+ * @param {typeof import("@huggingface/transformers").cat} [api.cat] — required for multi-image (per-image concat)
  */
 export function createTjsInfer(api) {
   const {
@@ -36,6 +46,7 @@ export function createTjsInfer(api) {
     InterruptableStoppingCriteria,
     StoppingCriteriaList,
     RawImage,
+    cat,
   } = api;
 
   /** Qwen chat EOS ids: <|im_end|> and <|endoftext|> (generation_config.json). */
@@ -65,7 +76,7 @@ export function createTjsInfer(api) {
       hint = "Keep the full answer to a few short sentences and stop when done.";
     else if (maxTokens <= 256)
       hint = "Keep the answer to one short paragraph and stop when done.";
-    else return prompt;
+    else hint = "Keep the answer concise and stop when done.";
 
     const lower = prompt.toLowerCase();
     if (
@@ -88,6 +99,43 @@ export function createTjsInfer(api) {
     const scale = maxEdge / long;
     // RawImage.resize is async (returns Promise<RawImage>).
     return await image.resize(Math.round(w * scale), Math.round(h * scale));
+  }
+
+  /**
+   * HF Qwen3VLVideoProcessor.smart_resize — budget is over `t × h × w`, not
+   * per frame, so longer clips shrink spatially instead of exploding tokens.
+   */
+  function videoSmartResize(
+    numFrames,
+    height,
+    width,
+    {
+      temporalFactor = 2,
+      factor = VIDEO_SPATIAL_FACTOR,
+      minPixels = VIDEO_MIN_PIXELS,
+      maxPixels = VIDEO_MAX_PIXELS,
+    } = {}
+  ) {
+    let h = height;
+    let w = width;
+    if (h < factor || w < factor) {
+      const scale = Math.max(factor / h, factor / w);
+      h = Math.floor(h * scale);
+      w = Math.floor(w * scale);
+    }
+    let hBar = Math.round(h / factor) * factor;
+    let wBar = Math.round(w / factor) * factor;
+    const tBar = Math.round(numFrames / temporalFactor) * temporalFactor;
+    if (tBar * hBar * wBar > maxPixels) {
+      const beta = Math.sqrt((numFrames * height * width) / maxPixels);
+      hBar = Math.max(factor, Math.floor(height / beta / factor) * factor);
+      wBar = Math.max(factor, Math.floor(width / beta / factor) * factor);
+    } else if (tBar * hBar * wBar < minPixels) {
+      const beta = Math.sqrt(minPixels / (numFrames * height * width));
+      hBar = Math.ceil((height * beta) / factor) * factor;
+      wBar = Math.ceil((width * beta) / factor) * factor;
+    }
+    return { height: hBar, width: wBar };
   }
 
   /**
@@ -119,6 +167,55 @@ export function createTjsInfer(api) {
     }
 
     return { processor, model };
+  }
+
+  /**
+   * Detect greedy sentence-loop collapse: the same long phrase appears 3+ times.
+   * Used to interrupt generate when EOS never arrives.
+   */
+  function detectRepeatingCollapse(text) {
+    if (text.length < 120) return false;
+    // Prefer sentence-sized chunks; fall back to a trailing window.
+    const sentences = text.split(/(?<=[.!?])\s+/).filter((s) => s.length >= 40);
+    if (sentences.length >= 3) {
+      const last = sentences[sentences.length - 1];
+      let hits = 0;
+      for (const s of sentences) {
+        if (s === last) hits += 1;
+      }
+      if (hits >= 3) return true;
+    }
+    const win = Math.min(80, Math.floor(text.length / 3));
+    if (win < 40) return false;
+    const needle = text.slice(-win);
+    let from = 0;
+    let hits = 0;
+    while (from <= text.length - win) {
+      const at = text.indexOf(needle, from);
+      if (at < 0) break;
+      hits += 1;
+      if (hits >= 3) return true;
+      from = at + win;
+    }
+    return false;
+  }
+
+  /** Drop trailing looped sentences once collapse is detected. */
+  function trimCollapsedRepetition(text) {
+    if (!detectRepeatingCollapse(text)) return text;
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    if (sentences.length < 3) return text;
+    const seen = new Map();
+    const kept = [];
+    for (const s of sentences) {
+      if (s.length >= 40) {
+        const n = (seen.get(s) || 0) + 1;
+        seen.set(s, n);
+        if (n >= 2) break; // keep first occurrence only
+      }
+      kept.push(s);
+    }
+    return kept.join(" ").trim();
   }
 
   /**
@@ -157,13 +254,21 @@ export function createTjsInfer(api) {
     stopping_criteria.push(interrupt);
 
     let sawEos = false;
+    let streamed = "";
     const streamer = new TextStreamer(processor.tokenizer, {
       skip_prompt: true,
       skip_special_tokens: true,
       // Do not gate on sawEos: token_callback may mark EOS in the same step
       // as the final text piece, and dropping it leaves short replies blank.
       callback_function: (piece) => {
-        if (piece && onToken) onToken(piece);
+        if (!piece) return;
+        streamed += piece;
+        // Greedy video decode can loop a sentence forever without emitting EOS.
+        if (detectRepeatingCollapse(streamed)) {
+          interrupt.interrupt();
+          return;
+        }
+        if (onToken) onToken(piece);
       },
       token_callback_function: (tokens) => {
         if (!tokens || sawEos) return;
@@ -184,6 +289,9 @@ export function createTjsInfer(api) {
         do_sample: doSample,
         eos_token_id,
         pad_token_id,
+        // Greedy video decode is prone to sentence loops without EOS.
+        repetition_penalty: doSample ? 1.0 : 1.1,
+        no_repeat_ngram_size: doSample ? 0 : 5,
         ...(doSample ? { temperature: temp } : {}),
       },
       eos_token_id,
@@ -219,14 +327,253 @@ export function createTjsInfer(api) {
         newTokenCount = tokenRows[0].length;
       }
     }
+    full = trimCollapsedRepetition(full);
     return { text: full, newTokenCount };
+  }
+
+  /**
+   * Build VL model inputs for one or more images.
+   *
+   * transformers.js `Qwen2VLImageProcessor` treats a RawImage[] as one batch
+   * and returns a single `image_grid_thw` row — that breaks multi-image pad
+   * expansion. Process each image alone, then concat (same idea as HF Lfm3).
+   *
+   * @param {*} processor
+   * @param {string} text — chat template with one `<|image_pad|>` per image
+   * @param {Array} imageList — RawImage[]
+   */
+  async function buildVlInputs(processor, text, imageList) {
+    if (imageList.length === 1) {
+      return processor(text, imageList[0]);
+    }
+    if (typeof cat !== "function") {
+      throw new Error(
+        "multi-image describe requires createTjsInfer({ cat }) from @huggingface/transformers"
+      );
+    }
+
+    const parts = await Promise.all(
+      imageList.map((img) => processor.image_processor(img))
+    );
+    const pixel_values = cat(
+      parts.map((p) => p.pixel_values),
+      0
+    );
+    const image_grid_thw = cat(
+      parts.map((p) => p.image_grid_thw),
+      0
+    );
+
+    // Mirror Qwen2VLProcessor._call pad expansion over per-image grids.
+    const merge_length = processor.image_processor.config.merge_size ** 2;
+    const image_token = "<|image_pad|>";
+    const grids = image_grid_thw.tolist();
+    let index = 0;
+    let expanded = text;
+    while (expanded.includes(image_token)) {
+      if (index >= grids.length) {
+        throw new Error(
+          `image pad count exceeds image_grid_thw rows (${grids.length})`
+        );
+      }
+      const prod = Number(grids[index++].reduce((a, b) => a * b, 1n));
+      expanded = expanded.replace(
+        image_token,
+        "<|placeholder|>".repeat(Math.floor(prod / merge_length))
+      );
+    }
+    if (index !== grids.length) {
+      throw new Error(
+        `unused image_grid_thw rows: used ${index} of ${grids.length}`
+      );
+    }
+    expanded = expanded.replaceAll("<|placeholder|>", image_token);
+    const text_inputs = processor.tokenizer(expanded);
+    return { ...text_inputs, pixel_values, image_grid_thw };
+  }
+
+  /**
+   * Average frame timestamps within each temporal patch (HF Qwen3-VL).
+   * @param {number[]} frameTimes
+   * @param {number} temporalPatchSize
+   */
+  function temporalGroupTimestamps(frameTimes, temporalPatchSize = 2) {
+    const tps = Math.max(1, temporalPatchSize | 0);
+    if (!frameTimes.length) return [];
+    const times = frameTimes.slice();
+    while (times.length % tps !== 0) {
+      times.push(times[times.length - 1]);
+    }
+    const out = [];
+    for (let i = 0; i < times.length; i += tps) {
+      out.push((times[i] + times[i + tps - 1]) / 2);
+    }
+    return out;
+  }
+
+  /**
+   * Build VL model inputs for a single video (Qwen3-VL timestamped path).
+   *
+   * transformers.js `Qwen2VLImageProcessor` treats a RawImage[] batch as a
+   * temporal stack when `dims[0] > 1`. Qwen3-VL expects the prompt to insert
+   * `<X.X seconds>` + a vision block per temporal group, and RoPE to see
+   * `video_grid_thw` rows with `t=1` (not one contiguous grid_t>1 span).
+   *
+   * @param {*} processor
+   * @param {string} userText — user prompt (no vision placeholders)
+   * @param {Array} frameList — RawImage[]
+   * @param {number[]} [frameTimestamps] — seek times in seconds
+   */
+  async function buildVlVideoInputs(
+    processor,
+    userText,
+    frameList,
+    frameTimestamps = []
+  ) {
+    if (!frameList.length) {
+      throw new Error("video requires at least one frame");
+    }
+    const tps = Number(processor.image_processor?.config?.temporal_patch_size) || 2;
+    const mergeSize = Number(processor.image_processor?.config?.merge_size) || 2;
+    const frames = frameList.slice();
+    while (frames.length % tps !== 0) {
+      frames.push(frames[frames.length - 1]);
+    }
+
+    let times =
+      Array.isArray(frameTimestamps) && frameTimestamps.length === frameList.length
+        ? frameTimestamps.slice()
+        : frameList.map((_, i) => i / 2);
+    while (times.length < frames.length) {
+      times.push(times[times.length - 1]);
+    }
+    times = times.slice(0, frames.length);
+
+    // Shared video spatial size (HF total-pixel budget). Without this, N frames
+    // each keep a full image resolution → thousands of vision tokens and
+    // greedy decode collapses into sentence loops.
+    const { height: vh, width: vw } = videoSmartResize(
+      frames.length,
+      frames[0].height,
+      frames[0].width
+    );
+    const sized = [];
+    for (const frame of frames) {
+      sized.push(
+        frame.width === vw && frame.height === vh
+          ? frame
+          : await frame.resize(vw, vh)
+      );
+    }
+
+    const ip = processor.image_processor;
+    const prevMin = ip.min_pixels;
+    const prevMax = ip.max_pixels;
+    // Pin processor resize to the video budget so it does not re-inflate.
+    ip.min_pixels = Math.min(vh * vw, VIDEO_MIN_PIXELS);
+    ip.max_pixels = Math.max(vh * vw, vh * vw);
+    let vision;
+    try {
+      vision = await ip(sized);
+    } finally {
+      ip.min_pixels = prevMin;
+      ip.max_pixels = prevMax;
+    }
+
+    const grids = vision.image_grid_thw.tolist();
+    if (grids.length !== 1) {
+      throw new Error(`expected one video grid row, got ${grids.length}`);
+    }
+    const gt = Number(grids[0][0]);
+    const gh = Number(grids[0][1]);
+    const gw = Number(grids[0][2]);
+    const tokensPerGroup = Math.floor((gh * gw) / (mergeSize * mergeSize));
+    const groupTimes = temporalGroupTimestamps(times, tps);
+    if (groupTimes.length !== gt) {
+      throw new Error(
+        `timestamp groups ${groupTimes.length} != video grid_t ${gt}`
+      );
+    }
+
+    const visionStart = "<|vision_start|>";
+    const visionEnd = "<|vision_end|>";
+    const videoToken = "<|video_pad|>";
+    let visionBlocks = "";
+    for (const ts of groupTimes) {
+      visionBlocks += `<${ts.toFixed(1)} seconds>`;
+      visionBlocks += visionStart + videoToken.repeat(tokensPerGroup) + visionEnd;
+    }
+    const expanded =
+      `<|im_start|>user\n${visionBlocks}${userText}<|im_end|>\n` +
+      `<|im_start|>assistant\n`;
+    const text_inputs = processor.tokenizer(expanded);
+
+    // Vision encode keeps the full temporal grid; RoPE gets split t=1 rows
+    // (Qwen3-VL get_rope_index expands video_grid_thw the same way).
+    const TensorCtor = vision.image_grid_thw.constructor;
+    const split = [];
+    for (let i = 0; i < gt; i++) {
+      split.push(1n, BigInt(gh), BigInt(gw));
+    }
+    const video_grid_thw = new TensorCtor("int64", BigInt64Array.from(split), [
+      gt,
+      3,
+    ]);
+
+    return {
+      ...text_inputs,
+      pixel_values: vision.pixel_values,
+      image_grid_thw: vision.image_grid_thw,
+      video_grid_thw,
+    };
+  }
+
+  /**
+   * Run generate while splicing vision features onto `<|video_pad|>` tokens.
+   *
+   * transformers.js gaps we paper over for a single video:
+   * 1. Merge only looks at `image_token_id` — override to `video_token_id`.
+   * 2. `forward_params` omits `video_grid_thw`, so `_prepare_model_inputs`
+   *    drops it before `get_rope_index` — temporarily allow the key (ONNX
+   *    session still picks only its own input names).
+   */
+  async function generateVideoFromInputs(opts) {
+    const { model } = opts;
+    const videoTokenId = model.config?.video_token_id;
+    if (videoTokenId == null) {
+      throw new Error("model.config.video_token_id missing");
+    }
+    const origMerge = model._merge_input_ids_with_image_features;
+    model._merge_input_ids_with_image_features = function mergeVideoPads(kwargs) {
+      return origMerge.call(this, {
+        ...kwargs,
+        image_token_id: videoTokenId,
+      });
+    };
+
+    const params = model.forward_params;
+    const hadVideoGrid = Array.isArray(params) && params.includes("video_grid_thw");
+    if (Array.isArray(params) && !hadVideoGrid) {
+      params.push("video_grid_thw");
+    }
+
+    try {
+      return await generateFromInputs(opts);
+    } finally {
+      model._merge_input_ids_with_image_features = origMerge;
+      if (Array.isArray(params) && !hadVideoGrid) {
+        const i = params.indexOf("video_grid_thw");
+        if (i >= 0) params.splice(i, 1);
+      }
+    }
   }
 
   /**
    * @param {object} opts
    * @param {*} opts.processor
    * @param {*} opts.model
-   * @param {*} opts.image — RawImage
+   * @param {*} [opts.image] — single RawImage (legacy)
+   * @param {*|Array} [opts.images] — RawImage or array of RawImage
    * @param {string} [opts.prompt]
    * @param {number} [opts.maxTokens]
    * @param {number} [opts.temperature]
@@ -236,6 +583,7 @@ export function createTjsInfer(api) {
     processor,
     model,
     image,
+    images,
     prompt,
     maxTokens,
     temperature,
@@ -244,20 +592,74 @@ export function createTjsInfer(api) {
     const budget = maxTokens || 128;
     const userText = withLengthBudget(prompt || "Describe this scene.", budget);
 
-    const conversation = [
-      {
-        role: "user",
-        content: [
-          { type: "image" },
-          { type: "text", text: userText },
-        ],
-      },
+    let imageList;
+    if (images != null) {
+      imageList = Array.isArray(images) ? images : [images];
+    } else if (image != null) {
+      imageList = [image];
+    } else {
+      throw new Error("describeImage requires image or images");
+    }
+    if (imageList.length === 0) {
+      throw new Error("describeImage requires at least one image");
+    }
+
+    const content = [
+      ...imageList.map(() => ({ type: "image" })),
+      { type: "text", text: userText },
     ];
+    const conversation = [{ role: "user", content }];
     const text = processor.apply_chat_template(conversation, {
       add_generation_prompt: true,
     });
-    const inputs = await processor(text, image);
+    const inputs = await buildVlInputs(processor, text, imageList);
     return generateFromInputs({
+      processor,
+      model,
+      inputs,
+      maxTokens: budget,
+      temperature,
+      onToken,
+    });
+  }
+
+  /**
+   * Single-video describe with Qwen3-VL timestamped `<|video_pad|>` blocks.
+   *
+   * @param {object} opts
+   * @param {*} opts.processor
+   * @param {*} opts.model
+   * @param {Array} opts.frames — RawImage[] sampled frames
+   * @param {number[]} [opts.timestamps] — seek times in seconds
+   * @param {string} [opts.prompt]
+   * @param {number} [opts.maxTokens]
+   * @param {number} [opts.temperature]
+   * @param {(piece: string) => void} [opts.onToken]
+   */
+  async function describeVideo({
+    processor,
+    model,
+    frames,
+    timestamps,
+    prompt,
+    maxTokens,
+    temperature,
+    onToken,
+  }) {
+    const budget = maxTokens || 128;
+    const userText = withLengthBudget(prompt || "Describe this scene.", budget);
+    const frameList = Array.isArray(frames) ? frames : [frames];
+    if (!frameList.length) {
+      throw new Error("describeVideo requires frames");
+    }
+
+    const inputs = await buildVlVideoInputs(
+      processor,
+      userText,
+      frameList,
+      timestamps
+    );
+    return generateVideoFromInputs({
       processor,
       model,
       inputs,
@@ -336,13 +738,18 @@ export function createTjsInfer(api) {
 
   return {
     MAX_IMAGE_EDGE,
+    VIDEO_MIN_PIXELS,
+    VIDEO_MAX_PIXELS,
     DEFAULT_MODEL_ID,
     DEFAULT_DTYPE,
     resolveEosTokenIds,
     withLengthBudget,
     resizeLongEdge,
+    videoSmartResize,
     loadVlModel,
     describeImage,
+    describeVideo,
+    buildVlVideoInputs,
     generatePrompt,
     generateFromInputs,
   };

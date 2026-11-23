@@ -3,7 +3,8 @@
  *
  * Messages from the main thread:
  *   { type: "init", modelId }
- *   { type: "describe", imageBytes, prompt, maxTokens, temperature }
+ *   { type: "describe", imageBytesList, prompt, maxTokens, temperature }
+ *   { type: "describe_video", frameBytesList, prompt, maxTokens, temperature }
  * Replies: progress | ready | token | done | error
  */
 
@@ -15,6 +16,7 @@ import {
   EosTokenCriteria,
   InterruptableStoppingCriteria,
   StoppingCriteriaList,
+  cat,
   env,
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2";
 
@@ -31,6 +33,7 @@ const infer = createTjsInfer({
   EosTokenCriteria,
   InterruptableStoppingCriteria,
   StoppingCriteriaList,
+  cat,
 });
 
 let processor = null;
@@ -92,22 +95,84 @@ async function init(id) {
   });
 }
 
-async function describe(imageBytes, prompt, maxTokens, temperature) {
+async function bytesToRawImages(byteList) {
+  const images = [];
+  for (const imageBytes of byteList) {
+    const bytes =
+      imageBytes instanceof ArrayBuffer ? new Uint8Array(imageBytes) : imageBytes;
+    const blob = new Blob([bytes]);
+    let image = await RawImage.fromBlob(blob);
+    image = await infer.resizeLongEdge(image, MAX_IMAGE_EDGE);
+    images.push(image);
+  }
+  return images;
+}
+
+async function describe(imageBytesList, prompt, maxTokens, temperature) {
   if (!processor || !model) {
     postMessage({ type: "error", message: "model not ready" });
     return;
   }
 
-  const bytes =
-    imageBytes instanceof ArrayBuffer ? new Uint8Array(imageBytes) : imageBytes;
-  const blob = new Blob([bytes]);
-  let image = await RawImage.fromBlob(blob);
-  image = await infer.resizeLongEdge(image, MAX_IMAGE_EDGE);
+  const list = Array.isArray(imageBytesList) ? imageBytesList : [imageBytesList];
+  if (list.length === 0) {
+    postMessage({ type: "error", message: "describe requires at least one image" });
+    return;
+  }
+  if (list.length > 4) {
+    postMessage({
+      type: "error",
+      message: "browser demo supports at most 4 images per prompt",
+    });
+    return;
+  }
 
+  const images = await bytesToRawImages(list);
   const { text } = await infer.describeImage({
     processor,
     model,
-    image,
+    images,
+    prompt,
+    maxTokens,
+    temperature,
+    onToken: (piece) => postMessage({ type: "token", text: piece }),
+  });
+  postMessage({ type: "done", text });
+}
+
+async function describeVideo(
+  frameBytesList,
+  timestamps,
+  prompt,
+  maxTokens,
+  temperature
+) {
+  if (!processor || !model) {
+    postMessage({ type: "error", message: "model not ready" });
+    return;
+  }
+  const list = Array.isArray(frameBytesList) ? frameBytesList : [frameBytesList];
+  if (list.length < 4) {
+    postMessage({
+      type: "error",
+      message: "describe_video requires at least 4 frames",
+    });
+    return;
+  }
+  if (list.length > 8) {
+    postMessage({
+      type: "error",
+      message: "browser demo supports at most 8 video frames",
+    });
+    return;
+  }
+
+  const frames = await bytesToRawImages(list);
+  const { text } = await infer.describeVideo({
+    processor,
+    model,
+    frames,
+    timestamps: Array.isArray(timestamps) ? timestamps : [],
     prompt,
     maxTokens,
     temperature,
@@ -123,7 +188,15 @@ onmessage = async (ev) => {
       await init(msg.modelId);
     } else if (msg.type === "describe") {
       await describe(
-        msg.imageBytes,
+        msg.imageBytesList ?? msg.imageBytes,
+        msg.prompt,
+        msg.maxTokens,
+        msg.temperature
+      );
+    } else if (msg.type === "describe_video") {
+      await describeVideo(
+        msg.frameBytesList,
+        msg.timestamps,
         msg.prompt,
         msg.maxTokens,
         msg.temperature

@@ -4,9 +4,20 @@
  * Model resolution (first match wins):
  *   1. `?model=` query param (Hugging Face Hub id)
  *   2. Default: onnx-community/Qwen3-VL-2B-Instruct-ONNX
+ *
+ * Media: up to 4 images **or** one video (exclusive).
  */
 
+import {
+  isImageFile,
+  isVideoFile,
+  sampleVideoFrames,
+  VIDEO_MAX_FRAMES_WEB,
+  VIDEO_MIN_FRAMES,
+} from "./video-sample.js";
+
 const DEFAULT_MODEL_ID = "onnx-community/Qwen3-VL-2B-Instruct-ONNX";
+const MAX_IMAGES = 4;
 
 const gate = document.getElementById("gate");
 const statusEl = document.getElementById("status");
@@ -15,7 +26,7 @@ const barFill = document.getElementById("barFill");
 const progressLabel = document.getElementById("progressLabel");
 const dropZone = document.getElementById("dropZone");
 const fileInput = document.getElementById("fileInput");
-const preview = document.getElementById("preview");
+const thumbs = document.getElementById("thumbs");
 const promptEl = document.getElementById("prompt");
 const maxTokensEl = document.getElementById("maxTokens");
 const temperatureEl = document.getElementById("temperature");
@@ -23,7 +34,17 @@ const describeBtn = document.getElementById("describeBtn");
 const caption = document.getElementById("caption");
 
 let worker = null;
-let imageBytes = null;
+/** @type {{ kind: "image", bytes: Uint8Array, url: string }[]} */
+let selectedImages = [];
+/**
+ * @type {null | {
+ *   kind: "video",
+ *   frameBytes: Uint8Array[],
+ *   url: string,
+ *   revokePreview: () => void,
+ * }}
+ */
+let selectedVideo = null;
 let ready = false;
 let busy = false;
 let modelLabel = DEFAULT_MODEL_ID;
@@ -66,6 +87,145 @@ function resolveModelId() {
   return modelLabel;
 }
 
+function hasMedia() {
+  return selectedImages.length > 0 || selectedVideo != null;
+}
+
+function syncDescribeEnabled() {
+  describeBtn.disabled = !ready || !hasMedia() || busy;
+}
+
+function clearImages() {
+  for (const item of selectedImages) {
+    if (item.url) URL.revokeObjectURL(item.url);
+  }
+  selectedImages = [];
+}
+
+function clearVideo() {
+  if (selectedVideo) {
+    selectedVideo.revokePreview?.();
+    selectedVideo = null;
+  }
+}
+
+function renderThumbs() {
+  thumbs.replaceChildren();
+  if (selectedVideo) {
+    const wrap = document.createElement("div");
+    wrap.className = "thumb";
+    const vid = document.createElement("video");
+    vid.src = selectedVideo.url;
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.controls = true;
+    vid.setAttribute("aria-label", "Selected video");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "Remove video");
+    remove.textContent = "×";
+    remove.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearVideo();
+      renderThumbs();
+      caption.textContent = "";
+    });
+    wrap.append(vid, remove);
+    thumbs.append(wrap);
+  } else {
+    selectedImages.forEach((item, index) => {
+      const wrap = document.createElement("div");
+      wrap.className = "thumb";
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = `Image ${index + 1}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Remove image ${index + 1}`);
+      remove.textContent = "×";
+      remove.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const [removed] = selectedImages.splice(index, 1);
+        if (removed?.url) URL.revokeObjectURL(removed.url);
+        renderThumbs();
+        caption.textContent = "";
+      });
+      wrap.append(img, remove);
+      thumbs.append(wrap);
+    });
+  }
+  syncDescribeEnabled();
+}
+
+async function ingestFiles(fileList) {
+  const files = [...fileList];
+  const videos = files.filter((f) => isVideoFile(f));
+  const images = files.filter((f) => isImageFile(f) && !isVideoFile(f));
+
+  if (videos.length && images.length) {
+    setStatus("Choose either one video or up to 4 images — not both");
+    return;
+  }
+
+  if (videos.length) {
+    if (videos.length > 1) {
+      setStatus("Only one video at a time");
+      return;
+    }
+    clearImages();
+    clearVideo();
+    setStatus("Sampling video frames…");
+    try {
+      const sampled = await sampleVideoFrames(videos[0], {
+        numFrames: VIDEO_MIN_FRAMES,
+      });
+      if (sampled.frameBytes.length < VIDEO_MIN_FRAMES) {
+        sampled.revokePreview?.();
+        setStatus(`Need at least ${VIDEO_MIN_FRAMES} frames from the video`);
+        return;
+      }
+      selectedVideo = {
+        kind: "video",
+        frameBytes: sampled.frameBytes.map((ab) => new Uint8Array(ab)),
+        timestamps: sampled.timestamps.slice(),
+        url: sampled.previewUrl,
+        revokePreview: sampled.revokePreview,
+      };
+      setStatus(
+        `Video ready (${selectedVideo.frameBytes.length} frames sampled)`
+      );
+    } catch (err) {
+      setStatus(err?.message || "video sample failed");
+      return;
+    }
+    renderThumbs();
+    caption.textContent = "";
+    fileInput.value = "";
+    return;
+  }
+
+  if (!images.length) return;
+  if (selectedVideo) clearVideo();
+  const room = MAX_IMAGES - selectedImages.length;
+  if (room <= 0) {
+    setStatus(`Already at ${MAX_IMAGES} images (remove one to add more)`);
+    return;
+  }
+  const take = images.slice(0, room);
+  for (const file of take) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    selectedImages.push({ kind: "image", bytes, url: URL.createObjectURL(file) });
+  }
+  if (images.length > take.length) {
+    setStatus(`Added ${take.length}; max is ${MAX_IMAGES} images`);
+  }
+  renderThumbs();
+  caption.textContent = "";
+  fileInput.value = "";
+}
+
 function bindUi() {
   dropZone.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -75,25 +235,15 @@ function bindUi() {
   dropZone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropZone.classList.remove("drag");
-    const file = e.dataTransfer?.files?.[0];
-    if (file) ingestFile(file);
+    if (e.dataTransfer?.files?.length) ingestFiles(e.dataTransfer.files);
   });
   fileInput.addEventListener("change", () => {
-    const file = fileInput.files?.[0];
-    if (file) ingestFile(file);
+    if (fileInput.files?.length) ingestFiles(fileInput.files);
   });
   describeBtn.addEventListener("click", () => {
-    if (!ready || !imageBytes || busy) return;
+    if (!ready || !hasMedia() || busy) return;
     runDescribe();
   });
-}
-
-async function ingestFile(file) {
-  imageBytes = new Uint8Array(await file.arrayBuffer());
-  preview.src = URL.createObjectURL(file);
-  preview.classList.remove("hidden");
-  describeBtn.disabled = !ready;
-  caption.textContent = "";
 }
 
 function startWorker(modelId) {
@@ -110,7 +260,7 @@ function startWorker(modelId) {
         setStatus(
           `Ready (${msg.backend || "webgpu"}, ${msg.quant || "q4f16"}, transformers.js)`
         );
-        describeBtn.disabled = !imageBytes;
+        syncDescribeEnabled();
         break;
       case "token":
         caption.textContent += msg.text || "";
@@ -124,7 +274,7 @@ function startWorker(modelId) {
         if (typeof msg.text === "string") {
           caption.textContent = msg.text;
         }
-        describeBtn.disabled = !imageBytes;
+        syncDescribeEnabled();
         setStatus("Ready (webgpu, transformers.js)");
         break;
       case "error":
@@ -134,7 +284,7 @@ function startWorker(modelId) {
           generatePulse = null;
         }
         hideProgress();
-        describeBtn.disabled = !imageBytes;
+        syncDescribeEnabled();
         setStatus(msg.message || "error");
         gate.textContent = msg.message || "error";
         gate.classList.remove("hidden");
@@ -167,19 +317,49 @@ function runDescribe() {
   let maxTokens = Number.parseInt(maxTokensEl.value, 10);
   if (!Number.isFinite(maxTokens)) maxTokens = 128;
   maxTokens = Math.max(16, Math.min(512, maxTokens));
-  const transfer = imageBytes.buffer.slice(
-    imageBytes.byteOffset,
-    imageBytes.byteOffset + imageBytes.byteLength
-  );
+
+  if (selectedVideo) {
+    const transfers = [];
+    const frameBytesList = selectedVideo.frameBytes.map((bytes) => {
+      const transfer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength
+      );
+      transfers.push(transfer);
+      return transfer;
+    });
+    worker.postMessage(
+      {
+        type: "describe_video",
+        frameBytesList,
+        timestamps: selectedVideo.timestamps || [],
+        prompt: promptEl.value || "Describe this scene.",
+        maxTokens,
+        temperature: Number.isFinite(temperature) ? temperature : 0,
+      },
+      transfers
+    );
+    return;
+  }
+
+  const transfers = [];
+  const imageBytesList = selectedImages.map((item) => {
+    const transfer = item.bytes.buffer.slice(
+      item.bytes.byteOffset,
+      item.bytes.byteOffset + item.bytes.byteLength
+    );
+    transfers.push(transfer);
+    return transfer;
+  });
   worker.postMessage(
     {
       type: "describe",
-      imageBytes: transfer,
+      imageBytesList,
       prompt: promptEl.value || "Describe this scene.",
       maxTokens,
       temperature: Number.isFinite(temperature) ? temperature : 0,
     },
-    [transfer]
+    transfers
   );
 }
 

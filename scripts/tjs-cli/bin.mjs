@@ -13,6 +13,7 @@ import {
   EosTokenCriteria,
   InterruptableStoppingCriteria,
   StoppingCriteriaList,
+  cat,
   env,
 } from "@huggingface/transformers";
 
@@ -23,7 +24,8 @@ import {
   MAX_IMAGE_EDGE,
 } from "../../web/static/tjs-infer.js";
 import { parseArgs, usage } from "./lib/args.js";
-import { collectImages } from "./lib/fs.js";
+import { configureWeightCache } from "./lib/cache.js";
+import { classifyDescribePaths, loadVideoFramePaths } from "./lib/fs.js";
 
 const infer = createTjsInfer({
   AutoProcessor,
@@ -33,6 +35,7 @@ const infer = createTjsInfer({
   EosTokenCriteria,
   InterruptableStoppingCriteria,
   StoppingCriteriaList,
+  cat,
 });
 
 function isLocalModelPath(model) {
@@ -46,6 +49,11 @@ function isLocalModelPath(model) {
 }
 
 function configureEnv(model) {
+  // Persist Hub downloads under weights/tjs-cache (not node_modules/.cache).
+  const { cacheDir, migrated } = configureWeightCache(env);
+  if (migrated) {
+    console.error(`migrated ONNX cache → ${cacheDir}`);
+  }
   if (isLocalModelPath(model)) {
     env.allowLocalModels = true;
     env.allowRemoteModels = false;
@@ -55,6 +63,7 @@ function configureEnv(model) {
     env.allowLocalModels = false;
     env.allowRemoteModels = true;
   }
+  return cacheDir;
 }
 
 function printMetrics({ loadMs, ttftMs, totalMs, tokens }) {
@@ -72,9 +81,10 @@ function printMetrics({ loadMs, ttftMs, totalMs, tokens }) {
   console.error(`metrics: ${parts.join("  ")}`);
 }
 
-async function loadModel(modelId, device) {
+async function loadModel(modelId, device, cacheDir) {
   const t0 = performance.now();
   console.error(`loading ${modelId} on ${device}…`);
+  if (cacheDir) console.error(`cache: ${cacheDir}`);
   const { processor, model } = await infer.loadVlModel({
     modelId,
     device,
@@ -82,6 +92,8 @@ async function loadModel(modelId, device) {
     progress: (() => {
       let lastLabel = "";
       let lastPct = -1;
+      /** Files that showed a partial progress tick (real download). */
+      const downloading = new Set();
       return (data) => {
         if (!data || data.status !== "progress") return;
         const total = data.total || 0;
@@ -91,7 +103,10 @@ async function loadModel(modelId, device) {
         const file = data.file
           ? String(data.file).split(/[/\\]/).pop()
           : "weights";
-        const label = `download ${file}`;
+        if (pct < 100) downloading.add(file);
+        // Cache hits often jump straight to 100%; label accordingly.
+        const verb = downloading.has(file) ? "download" : "load";
+        const label = `${verb} ${file}`;
         // Throttle: update when file changes or every 5% (incl. 100%).
         if (label !== lastLabel) {
           lastLabel = label;
@@ -110,56 +125,166 @@ async function loadModel(modelId, device) {
   return { processor, model, loadMs };
 }
 
-async function runDescribe(opts) {
+async function loadImages(paths) {
+  const out = [];
+  for (const imgPath of paths) {
+    let image = await RawImage.read(imgPath);
+    image = await infer.resizeLongEdge(image, MAX_IMAGE_EDGE);
+    out.push(image);
+  }
+  return out;
+}
+
+async function runDescribeOnce({
+  processor,
+  model,
+  images,
+  frames,
+  timestamps,
+  prompt,
+  maxTokens,
+  temperature,
+  metrics,
+  loadMs,
+}) {
+  let firstTokenAt = null;
+  const genStart = performance.now();
+  const onToken = (piece) => {
+    if (firstTokenAt == null) firstTokenAt = performance.now();
+    process.stdout.write(piece);
+  };
+
+  const result = frames
+    ? await infer.describeVideo({
+        processor,
+        model,
+        frames,
+        timestamps,
+        prompt,
+        maxTokens,
+        temperature,
+        onToken,
+      })
+    : await infer.describeImage({
+        processor,
+        model,
+        images,
+        prompt,
+        maxTokens,
+        temperature,
+        onToken,
+      });
+  const { text, newTokenCount } = result;
+  const totalMs = performance.now() - genStart;
+  if (!text.endsWith("\n")) process.stdout.write("\n");
+
+  let ttftMs = null;
+  if (metrics) {
+    ttftMs = firstTokenAt != null ? firstTokenAt - genStart : null;
+    printMetrics({
+      loadMs,
+      ttftMs,
+      totalMs,
+      tokens: newTokenCount,
+    });
+  }
+  void text;
+  return ttftMs;
+}
+
+async function runDescribeVideo(opts, source) {
   const modelId = opts.model || DEFAULT_MODEL_ID;
-  configureEnv(modelId);
-  const images = collectImages(opts.paths, opts.recursive);
-  const { processor, model, loadMs } = await loadModel(modelId, opts.device);
+  const cacheDir = configureEnv(modelId);
+  const { processor, model, loadMs } = await loadModel(
+    modelId,
+    opts.device,
+    cacheDir
+  );
+
+  const label =
+    source.kind === "frames" ? `${source.path} (frames)` : source.path;
+  console.error(`video: ${label}`);
+  const { paths: framePaths, timestamps } = loadVideoFramePaths(source, {
+    fps: opts.fps,
+    numFrames: opts.numFrames,
+  });
+  console.error(`sampled ${framePaths.length} frame(s)`);
+  const frames = await loadImages(framePaths);
+  await runDescribeOnce({
+    processor,
+    model,
+    frames,
+    timestamps,
+    prompt: opts.prompt,
+    maxTokens: opts.maxTokens,
+    temperature: opts.temperature,
+    metrics: opts.metrics,
+    loadMs,
+  });
+}
+
+async function runDescribe(opts) {
+  const media = classifyDescribePaths(opts.paths, opts.recursive, opts.video);
+  if (media.type === "video") {
+    if (opts.together) {
+      throw new Error("--together is image-only; omit it for video");
+    }
+    return runDescribeVideo(opts, media.source);
+  }
+
+  if (opts.fps != null || opts.numFrames != null) {
+    throw new Error("--fps / --num-frames apply only to video describe");
+  }
+
+  const modelId = opts.model || DEFAULT_MODEL_ID;
+  const cacheDir = configureEnv(modelId);
+  const paths = media.paths;
+  const { processor, model, loadMs } = await loadModel(
+    modelId,
+    opts.device,
+    cacheDir
+  );
+
+  if (opts.together) {
+    console.error(`multi-image prompt: ${paths.length} file(s)`);
+    for (let i = 0; i < paths.length; i++) {
+      console.error(`  [${i + 1}] ${paths[i]}`);
+    }
+    const images = await loadImages(paths);
+    await runDescribeOnce({
+      processor,
+      model,
+      images,
+      prompt: opts.prompt,
+      maxTokens: opts.maxTokens,
+      temperature: opts.temperature,
+      metrics: opts.metrics,
+      loadMs,
+    });
+    return;
+  }
 
   const ttfts = [];
-  for (let i = 0; i < images.length; i++) {
-    const imgPath = images[i];
-    if (images.length > 1) {
-      console.error(`\n=== [${i + 1}/${images.length}] ${imgPath}`);
+  for (let i = 0; i < paths.length; i++) {
+    const imgPath = paths[i];
+    if (paths.length > 1) {
+      console.error(`\n=== [${i + 1}/${paths.length}] ${imgPath}`);
     } else {
       console.error(`image: ${imgPath}`);
     }
 
-    let image = await RawImage.read(imgPath);
-    image = await infer.resizeLongEdge(image, MAX_IMAGE_EDGE);
-
-    let firstTokenAt = null;
-    const genStart = performance.now();
-    const onToken = (piece) => {
-      if (firstTokenAt == null) firstTokenAt = performance.now();
-      process.stdout.write(piece);
-    };
-
-    const { text, newTokenCount } = await infer.describeImage({
+    const images = await loadImages([imgPath]);
+    const ttftMs = await runDescribeOnce({
       processor,
       model,
-      image,
+      images,
       prompt: opts.prompt,
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
-      onToken,
+      metrics: opts.metrics,
+      loadMs: i === 0 ? loadMs : null,
     });
-    const totalMs = performance.now() - genStart;
-    if (!text.endsWith("\n")) process.stdout.write("\n");
-
-    if (opts.metrics) {
-      const ttftMs = firstTokenAt != null ? firstTokenAt - genStart : null;
-      if (ttftMs != null) ttfts.push(ttftMs);
-      printMetrics({
-        loadMs: i === 0 ? loadMs : null,
-        ttftMs,
-        totalMs,
-        tokens: newTokenCount,
-      });
-    }
-
-    // Suppress unused if stream already wrote full text; keep for parity.
-    void text;
+    if (ttftMs != null) ttfts.push(ttftMs);
   }
 
   if (opts.metrics && ttfts.length > 1) {
@@ -174,8 +299,12 @@ async function runDescribe(opts) {
 
 async function runPrompt(opts) {
   const modelId = opts.model || DEFAULT_MODEL_ID;
-  configureEnv(modelId);
-  const { processor, model, loadMs } = await loadModel(modelId, opts.device);
+  const cacheDir = configureEnv(modelId);
+  const { processor, model, loadMs } = await loadModel(
+    modelId,
+    opts.device,
+    cacheDir
+  );
 
   let firstTokenAt = null;
   let streamed = false;

@@ -125,13 +125,37 @@ prompt →  tokenize →  chat template with image-pad slots
             into <code>[-1, 1]</code>.
           </p>
           <p>
-            Qwen3-VL expects a temporal pair, so the frame is duplicated, then
-            cut into patches in merge-block order. Each patch is
+            For a still, Qwen3-VL expects a temporal pair, so the frame is
+            duplicated and cut into patches in merge-block order
+            (<code>grid_t = 1</code>). Each patch is
             <code>3×2×16×16 = 1536</code> values. After the vision merger, the
             model sees
             <code>grid_t × (grid_h/2) × (grid_w/2)</code> visual tokens. The
             chat template inserts that many <code>&lt;|image_pad|&gt;</code>
             slots between vision start/end markers.
+          </p>
+          <p>
+            For a single video, frames are sampled, padded to a multiple of
+            <code>temporal_patch_size</code>, then patchified with
+            <code>grid_t &gt; 1</code> for the vision tower. The chat template
+            follows Qwen3-VL: one
+            <code>&lt;X.X&nbsp;seconds&gt;</code> + vision block per temporal
+            group (not one contiguous pad run). Decode stays in JS
+            (<code>&lt;video&gt;</code>+canvas) or CLI <code>ffmpeg</code>;
+            Rust only sees the ordered frame images and their timestamps.
+          </p>
+          <p>
+            <strong>Frame count vs spatial resolution.</strong> HF video
+            <code>smart_resize</code> applies a total-pixel budget over
+            <code>t&nbsp;×&nbsp;h&nbsp;×&nbsp;w</code>, so longer samples shrink
+            each frame instead of stacking full-res stills. Browser demos
+            therefore fix <strong>4 frames</strong>
+            (<code>grid_t&nbsp;=&nbsp;2</code> after temporal packing): enough for
+            a real video path without starving detail under WebGPU cost. Pushing
+            toward 8 frames at 2&nbsp;fps often yields vague “abstract digital”
+            captions. The CLI keeps <code>--fps</code> /
+            <code>--num-frames</code> (4–16) when temporal coverage matters more
+            than per-frame sharpness.
           </p>
         </section>
 
@@ -167,6 +191,19 @@ prompt →  tokenize →  chat template with image-pad slots
             <code>MRopeEmbedding</code> turns those into cos/sin tables for the
             attention layers. Later decode steps that only add text reuse a
             cheaper 1D RoPE table where all three axes match.
+          </p>
+          <p>
+            Multi-image prompts emit one
+            <code>vision_start</code> / pads / <code>vision_end</code> block per
+            image. Each image is encoded separately; merger rows and DeepStack
+            features are concatenated, then spliced into the matching pad spans.
+            A single video is one encode with <code>grid_t &gt; 1</code>, then
+            spliced into <code>grid_t</code> separate
+            <code>&lt;|video_pad|&gt;</code> spans (token id 151656), each
+            preceded by a text timestamp. M-RoPE sees
+            <code>(1,&nbsp;h,&nbsp;w)</code> per span — time lives in the
+            timestamp text, not the RoPE T axis (Qwen3-VL). Browser demos take
+            either up to four images or one video, not both.
           </p>
         </section>
 

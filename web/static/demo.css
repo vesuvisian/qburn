@@ -158,6 +158,53 @@ a.brand-lockup:hover h1 {
   background: #000;
 }
 
+.thumbs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  align-content: start;
+}
+
+.thumbs:empty {
+  display: none;
+}
+
+.thumbs .thumb {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+}
+
+.thumbs .thumb img,
+.thumbs .thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumbs .thumb button {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, #000 65%, transparent);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  padding: 0;
+}
+
+.thumbs .thumb button:hover {
+  background: color-mix(in srgb, var(--accent) 80%, #000);
+}
+
 .controls {
   display: flex;
   flex-direction: column;

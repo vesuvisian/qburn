@@ -15,8 +15,15 @@ Shared options:
   --device <name>       ORT device (default: webgpu; use cpu if WebGPU unavailable)
   --metrics             Print TTFT / total / tok/s to stderr
 
+Hub weights cache under weights/tjs-cache (override with QBURN_TJS_CACHE
+or TRANSFORMERS_CACHE). First run downloads; later runs reuse the cache.
+
 describe:
   -r, --recursive       Recurse when expanding directories
+  --together            One multi-image prompt (default: caption each file)
+  --video               Treat the single path as one video (file or frame dir)
+  --fps <F>             Sample F frames/sec (default 2; exclusive with --num-frames)
+  --num-frames <N>      Sample exactly N frames (exclusive with --fps)
   --prompt <TEXT>       Caption instruction (default: Describe this scene.)
 
 prompt:
@@ -46,6 +53,10 @@ export function parseArgs(argv) {
     device: "webgpu",
     metrics: false,
     recursive: false,
+    together: false,
+    video: false,
+    fps: null,
+    numFrames: null,
     prompt: "Describe this scene.",
     system: "You are a helpful assistant.",
     stream: false,
@@ -68,8 +79,30 @@ export function parseArgs(argv) {
       opts.recursive = true;
       continue;
     }
+    if (a === "--together") {
+      opts.together = true;
+      continue;
+    }
+    if (a === "--video") {
+      opts.video = true;
+      continue;
+    }
     if (a === "--stream") {
       opts.stream = true;
+      continue;
+    }
+    if (a === "--fps") {
+      opts.fps = Number(needValue(rest, ++i, a));
+      if (!Number.isFinite(opts.fps) || opts.fps <= 0) {
+        throw new Error(`invalid --fps`);
+      }
+      continue;
+    }
+    if (a === "--num-frames") {
+      opts.numFrames = parseInt(needValue(rest, ++i, a), 10);
+      if (!Number.isFinite(opts.numFrames) || opts.numFrames < 1) {
+        throw new Error(`invalid --num-frames`);
+      }
       continue;
     }
     if (a === "--model") {
@@ -110,7 +143,10 @@ export function parseArgs(argv) {
 
   if (command === "describe") {
     if (positionals.length === 0) {
-      throw new Error(`describe requires one or more image paths\n\n${usage()}`);
+      throw new Error(`describe requires one or more image/video paths\n\n${usage()}`);
+    }
+    if (opts.fps != null && opts.numFrames != null) {
+      throw new Error("--fps and --num-frames are mutually exclusive");
     }
     opts.paths = positionals;
   } else {

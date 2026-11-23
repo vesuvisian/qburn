@@ -24,6 +24,8 @@ use crate::server::LaunchError;
 use crate::server::ServerError;
 use crate::tune::sampler::measured;
 use crate::tune::{AutotuneLoggerExt, AutotuneResult, TimeBound, TuneCache, tune_benchmark};
+// Brings `RuntimeConfig::get` into scope for the native adaptive / short-circuit paths.
+#[cfg(not(target_family = "wasm"))]
 use cubecl_environment::config::RuntimeConfig;
 
 use super::{
@@ -564,13 +566,10 @@ impl<K: AutotuneKey> Tuner<K> {
     where
         <F as TuneInputs>::At<'i>: Clone + Send,
     {
-        // The batch-retry check below reads this through `cfg!`, which keeps
-        // the name alive on wasm too; the assignment is native-only, so it
-        // simply stays false there.
+        // Native short-circuit path ORs into this; wasm only breaks when `pending`
+        // gained a successful launch.
         #[cfg(not(target_family = "wasm"))]
         let mut batch_success = false;
-        #[cfg(target_family = "wasm")]
-        let batch_success = false;
 
         // Walk the plan batch by batch, launching each benchmark synchronously. A
         // successful launch queues a `PendingBench` for the async resolver below;

@@ -16,7 +16,8 @@ Vendored from crates.io **`cubecl-runtime 0.12.0-pre.2`**. One fix for wasm:
 Upstream gates `tune::sampler` behind `not(wasm)`, but `tuner.rs` still calls
 `measured` from that module when resolving autotune benches. That breaks
 `wasm32-unknown-unknown` builds of Burn `webgpu`. This patch keeps `mod sampler`
-available on wasm (the helper is pure timing math).
+available on wasm, with only `measured` compiled in (SampleSet / TimeChange stay
+native-only with the adaptive schedule).
 
 With Burn **0.23.0-pre.2**, matmul goes through cubek’s **Hardware-aware** tile-DSL
 selector (`MatmulKernelHeuristic::Tile`): kernels are planned against the
