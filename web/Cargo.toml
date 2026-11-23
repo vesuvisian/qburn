@@ -1,0 +1,53 @@
+[package]
+name = "qburn-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+description = "Wasm-bindgen WebGPU demo for qburn"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[features]
+default = ["webgpu"]
+# `qburn/webgpu` intentionally omits `burn/fusion` (Burn: fusion can break wasm).
+# Autotune stays off; CubeCL Hardware-aware matmul stays within WebGPU smem.
+webgpu = ["qburn/webgpu", "burn/webgpu"]
+
+[dependencies]
+qburn = { path = "../crates/qburn", default-features = false }
+burn = { workspace = true }
+bytes = { workspace = true }
+console_error_panic_hook = { workspace = true }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+js-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+
+[dependencies.web-sys]
+workspace = true
+features = [
+    "console",
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Cache",
+    "CacheStorage",
+    "Headers",
+    "WorkerGlobalScope",
+]
+
+[package.metadata.wasm-pack.profile.release]
+# Shrink / optimize the wasm module (needs `wasm-opt` from Binaryen on PATH).
+wasm-opt = ["-O"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

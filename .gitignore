@@ -1,0 +1,13 @@
+/target
+/weights/**
+!/weights/.gitkeep
+/models
+*.bpk
+*.safetensors
+.venv
+.DS_Store
+web/pkg
+web/dist
+site/
+docs/app/pkg*
+*.log

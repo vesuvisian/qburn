@@ -1,0 +1,19 @@
+[package]
+name = "qburn-converter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "qburn-converter"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+qburn = { path = "../qburn", default-features = false, features = ["wgpu", "autotune"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+indicatif = "0.17"

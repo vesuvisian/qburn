@@ -1,0 +1,54 @@
+[package]
+name = "qburn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Burn-native Qwen3-VL scene description"
+readme = "../../README.md"
+
+[[bin]]
+name = "qburn"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+# Native defaults: wgpu + fusion + autotune. Web builds use
+# `default-features = false` + `webgpu` (**no** fusion, no autotune).
+# Burn 0.23 notes fusion "might be necessary" to disable on wasm — fused
+# kernels have been a source of WebGPU caption collapse vs Metal.
+# On Apple, prefer `--features metal,cli` for CubeCL Metal matmuls.
+default = ["wgpu", "cli", "autotune"]
+cli = ["dep:clap", "dep:anyhow"]
+autotune = ["burn/autotune"]
+wgpu = ["burn/wgpu", "burn/fusion"]
+# wgpu compiling to native MSL (still usually slower than `metal` on Apple).
+wgpu-msl = ["burn/wgpu-msl", "burn/fusion"]
+# Browser / WGSL path: pin `burn/webgpu` without fusion.
+webgpu = ["burn/wgpu", "burn/webgpu"]
+metal = ["burn/metal", "burn/fusion", "burn/autotune"]
+cuda = ["burn/cuda", "burn/fusion", "burn/autotune"]
+flex = ["burn/flex"]
+
+[dependencies]
+burn = { workspace = true }
+burn-store = { workspace = true }
+bytes = { workspace = true }
+getrandom = { workspace = true }
+half = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokenizers = { workspace = true }
+safetensors = "0.4"
+clap = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

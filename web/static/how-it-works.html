@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>qburn — how it works</title>
+    <meta
+      name="description"
+      content="How qburn runs Qwen3-VL-2B on Burn: preprocess, vision, fusion, decoder, burnpacks, and the browser path."
+    />
+    <link rel="icon" href="./logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="./logo.png" />
+    <link rel="stylesheet" href="./demo.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <main class="stage article">
+      <nav class="site-nav" aria-label="Site">
+        <a href="./">Demo</a>
+        <a href="./engineering.html">Engineering</a>
+        <a href="./how-it-works.html" aria-current="page">How it works</a>
+      </nav>
+
+      <header class="brand">
+        <div class="brand-lockup">
+          <img class="brand-mark" src="./logo.png" alt="" width="56" height="73" />
+          <h1>qburn</h1>
+        </div>
+        <p>
+          How an image and a prompt become caption tokens — in the CLI and in
+          this WebGPU demo.
+        </p>
+      </header>
+
+      <article class="prose">
+        <p>
+          qburn implements
+          <a href="https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct"
+            >Qwen3-VL-2B-Instruct</a
+          >
+          as Burn modules. An image is turned into visual tokens, those tokens
+          are spliced into the chat template, and the language model generates
+          text. The browser build is the same cascade compiled to wasm.
+        </p>
+        <pre class="flow" aria-label="Inference pipeline"><code>image  →  patches  →  vision tower (+ DeepStack)
+prompt →  tokenize →  chat template with image-pad slots
+                      ↓
+         replace pads with visual rows → decode tokens</code></pre>
+
+        <section id="model-config">
+          <h2>Model shape</h2>
+          <p>
+            The 2B instruct preset matches upstream <code>config.json</code>
+            (<code>Qwen3VlConfig::qwen3_vl_2b()</code>):
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Part</th>
+                  <th>Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Language model</td>
+                  <td>
+                    hidden 2048, 28 layers, 16 heads / 8 KV heads, head dim 128,
+                    MLP width 6144, vocab ~152k
+                  </td>
+                </tr>
+                <tr>
+                  <td>Vision tower</td>
+                  <td>
+                    24 layers, hidden 1024, 16 heads, 16×16 patches, temporal
+                    patch 2, spatial merge 2 → 2048-d visual tokens
+                  </td>
+                </tr>
+                <tr>
+                  <td>DeepStack</td>
+                  <td>
+                    Extra features from vision layers 5, 11, and 17 are added
+                    into early decoder residuals
+                  </td>
+                </tr>
+                <tr>
+                  <td>M-RoPE</td>
+                  <td>
+                    3D rotary sections <code>[24, 20, 20]</code>,
+                    <code>rope_theta=5e6</code>, interleaved layout
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="preprocess">
+          <h2>From pixels to patches</h2>
+          <p>
+            <code>ImageProcessor</code> in
+            <code>crates/qburn/src/vision/preprocess.rs</code> decodes PNG,
+            JPEG, or WebP, then resizes so both sides are multiples of 32 (patch
+            size × spatial merge). Total pixels stay inside a
+            <code>[min_pixels, max_pixels]</code> band. RGB is scaled roughly
+            into <code>[-1, 1]</code>.
+          </p>
+          <p>
+            Qwen3-VL expects a temporal pair, so the frame is duplicated, then
+            cut into patches in merge-block order. Each patch is
+            <code>3×2×16×16 = 1536</code> values. After the vision merger, the
+            model sees
+            <code>grid_t × (grid_h/2) × (grid_w/2)</code> visual tokens. The
+            chat template inserts that many <code>&lt;|image_pad|&gt;</code>
+            slots between vision start/end markers.
+          </p>
+        </section>
+
+        <section id="vision">
+          <h2>Vision tower</h2>
+          <p>
+            <code>VisionEncoder</code> follows the Hugging Face
+            <code>Qwen3VLVision*</code> layout. The checkpoint stores patch
+            embedding as a Conv3d <code>[1024, 3, 2, 16, 16]</code>; at load we
+            flatten that into a Linear <code>[1536, 1024]</code> plus bias.
+          </p>
+          <p>
+            Absolute positions come from a learned 48×48 grid
+            (<code>num_position_embeddings=2304</code>), bilinearly resampled to
+            the image’s patch grid (<code>align_corners=True</code>). On wasm
+            that table is built on the CPU via <code>into_data_async</code>.
+            Patches also get 2D rotary embeddings with interleaved height/width
+            frequencies. Each block is LayerNorm → attention → GELU MLP with
+            residuals. A spatial merger groups 2×2 patches and projects them to
+            the language width (2048). DeepStack runs extra mergers at the
+            configured layers and scatters those features onto the image-pad
+            positions later in the decoder.
+          </p>
+        </section>
+
+        <section id="fusion">
+          <h2>Splicing vision into text</h2>
+          <p>
+            <code>build_multimodal_embeddings</code> embeds the token ids as
+            usual, then overwrites each image-pad position with the matching
+            visual row. Position ids are 3D (time, height, width) over the
+            vision grid, then continue along the text.
+            <code>MRopeEmbedding</code> turns those into cos/sin tables for the
+            attention layers. Later decode steps that only add text reuse a
+            cheaper 1D RoPE table where all three axes match.
+          </p>
+        </section>
+
+        <section id="decoder">
+          <h2>Language decoder</h2>
+          <p>
+            <code>TextDecoder</code> is a dense Qwen3 stack: RMSNorm, fused QKV
+            with QK-Norm, grouped-query attention, and a SwiGLU MLP with fused
+            gate/up projections. Each layer keeps a KV cache so decode steps
+            only attend with a single new query. Prefill still uses a causal
+            mask; decode does not rebuild one.
+          </p>
+          <p>
+            When the HF config ties embeddings, <code>lm_head</code> shares the
+            embed matrix. Burn’s Linear wants <code>[hidden, vocab]</code>, so
+            the tied copy is transposed from the <code>[vocab, hidden]</code>
+            embed. Temperature ≤ 0 is greedy argmax; above 0 we scale logits,
+            softmax, and multinomial-sample with <code>getrandom</code>. Both
+            CLI and wasm stream one token id at a time and stop on
+            <code>&lt;|im_end|&gt;</code>. With <code>--probe</code> (or
+            <code>?probe=1</code> on the page) the first prefill step dumps its
+            top-10 logits for Metal vs WebGPU checks.
+          </p>
+        </section>
+
+        <section id="weights">
+          <h2>Weights</h2>
+          <p>
+            <code>qburn-converter</code> (<code>crates/converter</code>) loads
+            Hugging Face safetensors into Burn modules, optionally quantizes,
+            writes a burnpack, then splits it into
+            <code>.bpk.part</code> shards listed by <code>manifest.json</code>.
+            Flag details are in the repo README.
+          </p>
+          <pre><code>HF safetensors → Burn modules → quantize → .bpk → .bpk.part + manifest.json</code></pre>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Mode</th>
+                  <th>What you get</th>
+                  <th>~Size (2B)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>fp32</code></td>
+                  <td>Full precision resident tensors</td>
+                  <td>~9 GiB</td>
+                </tr>
+                <tr>
+                  <td><code>fp16</code></td>
+                  <td>Stored F16, loaded as F32</td>
+                  <td>~4.5 GiB</td>
+                </tr>
+                <tr>
+                  <td><code>q4</code></td>
+                  <td>Uniform Q4S, block 32, F16 scales</td>
+                  <td>~1.3 GiB</td>
+                </tr>
+                <tr>
+                  <td><code>q4-mix</code></td>
+                  <td>
+                    Q4S on large linears; embeds, norms, vision I/O stay F16
+                  </td>
+                  <td>~1.8 GiB</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            <code>q4-mix</code> is asymmetric post-training quant with Burn’s
+            MinMax only (no AWQ/GPTQ). Embeddings, every norm, vision
+            patch/pos/merger/DeepStack, and linear biases stay F16. Decoder QKV,
+            output, SwiGLU, and vision-block linears go Q4S.
+            <code>lm_head</code> may be stored quantized and re-tied from the
+            float embed on load.
+          </p>
+          <p>
+            Keeping the whole ViT in F16 plus a float embed blows past the
+            ~2 GiB wasm32 ceiling when shards are concatenated, so vision blocks
+            stay Q4S in the browser pack. Prefer <code>q4-mix</code> for
+            quality; use uniform <code>q4</code> if you need the smaller
+            download. The page pre-sizes the concat buffer from the manifest
+            byte count — letting a Vec amortize growth on a ~1 GiB pack can
+            overflow wasm32. Parts are cached with the Cache API. Weights are
+            not in git; Pages CI rejects files ≥100 MB.
+          </p>
+        </section>
+
+        <section id="browser">
+          <h2>Browser path</h2>
+          <pre class="flow"><code>index.html / demo.js
+        │ postMessage
+        ▼
+   worker.js  →  pkg/qburn_web.js (wasm)
+                   init WebGPU, fetch shards, stream tokens
+        ▼
+   caption area</code></pre>
+          <p>
+            Inference runs in a Web Worker (<code>web/src/lib.rs</code>). WebGPU
+            is acquired with
+            <code>Device::wgpu_options().graphics_api(WebGpu).init_async()</code>
+            before any weight download, so unsupported browsers fail fast.
+            Fetches use <code>WorkerGlobalScope</code> —
+            <code>web_sys::window()</code> is null in the worker. Shards are
+            concatenated to the manifest size, loaded as one burnpack, and the
+            device stays in app state for <code>describe</code>.
+          </p>
+          <p>
+            On wasm, argmax and vision pos-embed sampling go through
+            <code>into_data_async</code>; the CLI blocks the same futures with
+            <code>pollster</code>. The demo caps preprocess at 262 144 pixels
+            (the CLI allows ~1 M), fetches shards in parallel, skips causal
+            masks on single-token decode steps, and only runs the prefill probe
+            when the URL has <code>?probe=1</code>. Prefill writes vision and
+            DeepStack features in one contiguous assign; absolute pos tables are
+            cached after the first image.
+          </p>
+        </section>
+
+        <section id="webgpu-matmul">
+          <h2>WebGPU matmul</h2>
+          <p>
+            Burn 0.23 + CubeCL 0.12-pre pick matmul tiles with a hardware-aware
+            planner (<code>MatmulKernelHeuristic::Tile</code>) against
+            <code>max_shared_memory_size</code>. Browsers are often around
+            32 KiB. Older Burn 0.22 paths asked for ~72 KiB tiles and needed a
+            forced Naive override; that patch is gone.
+          </p>
+          <p>
+            A small <code>cubecl-runtime</code> patch under <code>patches/</code>
+            keeps the wasm build compiling (upstream gates
+            <code>tune::sampler</code> off wasm but still calls it). Autotune
+            stays off for the web crate — a bad candidate can emit invalid WGSL
+            and poison the device. Fusion is also off on the
+            <code>webgpu</code> feature; fused kernels were a suspected cause of
+            greedy collapse in the browser versus Metal on the same
+            <code>q4-mix</code> pack. On macOS the default desktop
+            <code>wgpu</code> feature often rides Metal; for a WGSL control
+            build use <code>--features webgpu,cli</code>.
+          </p>
+          <p>
+            Native Metal is still a different CubeCL runtime than browser WGSL.
+            Captions and speed will diverge even on one burnpack. Don’t hide that
+            with prompt or loop hacks.
+          </p>
+          <p>
+            The page always loads burnpacks (Hub by default, or
+            <code>python3 web/preview.py --weights DIR</code>). The CLI can also
+            open a raw HF safetensors checkout. Local preview uses a threaded
+            HTTP server so multi-hundred-megabyte shard GETs don’t freeze the
+            SPA. There is no CPU fallback for this model in the UI.
+          </p>
+        </section>
+
+        <section id="parity">
+          <h2>Checking parity</h2>
+          <p>
+            When a caption looks wrong, separate quantization loss from backend
+            drift. Same image, prompt <code>Describe this scene.</code>,
+            temperature 0, with <code>--probe</code>:
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>What you’re testing</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>CLI + HF safetensors (<code>--features metal</code>)</td>
+                  <td>Reference caption</td>
+                </tr>
+                <tr>
+                  <td>CLI + <code>weights/burnpack-q4</code> on Metal</td>
+                  <td>Uniform q4 vs HF</td>
+                </tr>
+                <tr>
+                  <td>CLI + <code>weights/burnpack-q4-mix</code> on Metal</td>
+                  <td>Mix quant vs HF / q4</td>
+                </tr>
+                <tr>
+                  <td>CLI <code>--features webgpu,cli</code> + same pack</td>
+                  <td>Native WGSL, no fusion</td>
+                </tr>
+                <tr>
+                  <td>This page + same <code>q4-mix</code> pack</td>
+                  <td>Browser WebGPU</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <pre><code>cargo run -p qburn --release --no-default-features --features metal,cli -- \
+  describe --model weights/burnpack-q4-mix --temperature 0 --max-tokens 64 --probe \
+  path/to/photo.jpg</code></pre>
+          <p>
+            Merge-token counts should match. Prefill top-10 logits should be
+            close when Metal and no-fusion wgpu land on the same GPU API;
+            browser WebGPU can still drift — check the worker console for
+            <code>prefill probe:</code>. <code>q4-mix</code> should track HF
+            better than uniform <code>q4</code>.
+          </p>
+          <p>
+            For numeric dumps, <code>scripts/dump_logits_ref.py</code> writes an
+            HF reference under <code>tests/parity/</code>. Config and preprocess
+            unit tests live next to the crate; CLI flags are in the README.
+          </p>
+        </section>
+      </article>
+
+      <p class="article-foot">
+        <a href="./">← Back to the demo</a>
+        ·
+        <a href="./engineering.html">Why not transformers.js</a>
+      </p>
+    </main>
+  </body>
+</html>
