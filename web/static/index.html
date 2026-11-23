@@ -6,7 +6,7 @@
     <title>qburn</title>
     <meta
       name="description"
-      content="Qwen3-VL-2B on Burn end to end — CLI and WebGPU browser demo, plus a transformers.js comparison path."
+      content="Qwen3-VL-2B on Burn end to end — images and video on the CLI and WebGPU browser demo, plus a transformers.js comparison path."
     />
     <link rel="icon" href="./logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="./logo.png" />
@@ -39,8 +39,8 @@
           <h1>qburn</h1>
         </div>
         <p class="lead">
-          Run Qwen3-VL with Burn — the same Rust model on the command line and
-          in the browser.
+          Run Qwen3-VL with Burn — images and video, same Rust model on the
+          command line and in the browser.
         </p>
       </header>
 
@@ -51,24 +51,30 @@
 
       <section class="landing-body prose" aria-label="About">
         <p>
-          Drop in a photo, ask for a description, and the model streams a
-          caption back. Vision and language are written as Burn modules — no
-          ONNX in the middle. What you run with
-          <code>cargo run -p qburn</code> on Metal or CUDA is what the wasm
-          build runs on WebGPU.
+          Drop in a photo or a short clip, ask for a description, and the model
+          streams a caption back. Demos take up to four images or one video
+          (four sampled frames); the CLI can sample more with
+          <code>--fps</code> / <code>--num-frames</code>.
         </p>
         <p>
-          You’ll need a browser with WebGPU. The Burn demo pulls about 1.8 GiB
-          of weights (<code>q4-mix</code>) and is honestly slow — a short
-          caption can take a minute. That’s fine for poking at the stack; for
-          real speed, use the CLI. The transformers.js page is here so you can
-          try the usual ONNX path side by side.
+          Two browser demos, same job. The
+          <a href="./demo.html">Burn demo</a> is the unusual one: vision and
+          language are ported to Burn modules in Rust — no ONNX export in
+          the middle. What you run with <code>cargo run -p qburn</code> on
+          Metal or CUDA is what the wasm build runs on WebGPU.
         </p>
         <p>
-          There’s a walkthrough of the
-          <a href="./architecture.html">pipeline</a>, a
+          The <a href="./tjs.html">transformers.js demo</a> is the traditional
+          path people already use: export to ONNX, let ONNX Runtime drive
+          WebGPU. It’s currently much faster due to better backend
+          optimizations, so it’s here as a fair baseline, not a rival product.
+          You’ll need WebGPU for both.
+        </p>
+        <p>
+          More details can be found in the
+          <a href="./architecture.html">pipeline walkthrough</a>, the
           <a href="./compare.html">Burn vs transformers.js</a>
-          write-up, and the full project on
+          notes, and on
           <a href="https://github.com/vesuvisian/qburn" rel="noopener noreferrer"
             >GitHub</a
           >.

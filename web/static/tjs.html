@@ -6,7 +6,7 @@
     <title>qburn — transformers.js</title>
     <meta
       name="description"
-      content="Qwen3-VL scene description via transformers.js and ONNX Runtime WebGPU — the comparison path next to the Burn demo."
+      content="Describe a scene with Qwen3-VL via transformers.js and ONNX Runtime on WebGPU — the faster baseline next to the Burn demo."
     />
     <link rel="icon" href="./logo.png" type="image/png" />
     <link rel="apple-touch-icon" href="./logo.png" />
@@ -39,11 +39,9 @@
           <h1>qburn</h1>
         </a>
         <p>
-          Same caption job via transformers.js and ONNX Runtime on WebGPU —
-          the faster baseline next to Burn. Why both exist:
-          <a href="./compare.html">Compare</a>. How the Burn path is wired:
-          <a href="./architecture.html">Architecture</a>. Node twin:
-          <code>scripts/tjs-cli</code>.
+          transformers.js + ONNX Runtime on WebGPU — same caption job as Burn,
+          usually faster. See
+          <a href="./compare.html">why both demos exist</a>.
         </p>
       </header>
 
@@ -95,7 +93,6 @@
               step="0.1"
               value="0"
               autocomplete="off"
-              title="0 = greedy (do_sample false). Non-zero enables sampling."
             />
             <button id="describeBtn" type="button" disabled>Describe</button>
           </div>

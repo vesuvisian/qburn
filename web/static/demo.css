@@ -64,6 +64,7 @@ a.brand-lockup:hover h1 {
   letter-spacing: -0.04em;
   font-weight: 700;
   line-height: 0.95;
+  color: var(--ink);
 }
 
 .brand p {
@@ -289,7 +290,7 @@ a.brand-lockup:hover h1 {
   color: var(--accent);
 }
 
-.brand a {
+.brand p a {
   color: var(--accent);
 }
 
