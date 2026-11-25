@@ -51,7 +51,6 @@ pub fn generate_text(
         all_ids.push(next);
         let start = all_ids.len() - 1;
         let tokens = ids_to_tensor(&[next], device);
-        // Decode steps are q_len=1 over the KV cache — already causal.
         let logits = decoder.forward(tokens, rope, None, &mut caches, start);
         next = sample_next(&logits, temperature);
     }
@@ -89,7 +88,6 @@ pub fn generate_text_streaming(
         all_ids.push(next);
         let start = all_ids.len() - 1;
         let tokens = ids_to_tensor(&[next], device);
-        // Decode steps are q_len=1 over the KV cache — already causal.
         let logits = decoder.forward(tokens, rope, None, &mut caches, start);
         next = sample_next(&logits, temperature);
     }
@@ -210,8 +208,10 @@ pub async fn sample_next_guarded_async(
 ) -> u32 {
     let last = last_logits_row(logits);
     if temperature <= 0.0 {
-        let need_guard = (repetition_penalty - 1.0).abs() > f32::EPSILON
-            || no_repeat_ngram_size > 0;
+        // Prefill's first sample has empty `generated` — repetition/ngram guards
+        // are no-ops, so skip the full-vocab GPU→CPU readback and stay on argmax.
+        let need_guard = !generated.is_empty()
+            && ((repetition_penalty - 1.0).abs() > f32::EPSILON || no_repeat_ngram_size > 0);
         if !need_guard {
             let idx = last.argmax(1);
             let data = idx

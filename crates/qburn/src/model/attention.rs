@@ -1,11 +1,11 @@
 use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
-use burn::tensor::activation;
 
 use super::cache::KvCache;
 use super::rms_norm::RmsNorm;
 use super::rope::{apply_rotary, RotaryEmbedding};
+use super::sdpa::scaled_dot_product_attention;
 
 /// Grouped-query attention KV cache pair.
 pub struct AttentionKvCache {
@@ -78,7 +78,7 @@ impl MultiHeadAttention {
         &self,
         x: Tensor<3>,
         rope: &RotaryEmbedding,
-        mask: Option<Tensor<4>>,
+        mask: Option<&Tensor<4>>,
         cache: &mut AttentionKvCache,
         start_pos: usize,
     ) -> Tensor<3> {
@@ -90,9 +90,9 @@ impl MultiHeadAttention {
     pub fn forward_with_cos_sin(
         &self,
         x: Tensor<3>,
-        cos: Tensor<2>,
-        sin: Tensor<2>,
-        mask: Option<Tensor<4>>,
+        cos: &Tensor<2>,
+        sin: &Tensor<2>,
+        mask: Option<&Tensor<4>>,
         cache: &mut AttentionKvCache,
     ) -> Tensor<3> {
         let (q, k, v) = self.project(x);
@@ -120,12 +120,12 @@ impl MultiHeadAttention {
 
         let q = self
             .q_norm
-            .forward(q.reshape([batch * seq_len * self.num_heads, 1, self.head_dim]))
+            .forward_2d(q.reshape([batch * seq_len * self.num_heads, self.head_dim]))
             .reshape([batch, seq_len, self.num_heads, self.head_dim])
             .swap_dims(1, 2);
         let k = self
             .k_norm
-            .forward(k.reshape([batch * seq_len * self.num_kv_heads, 1, self.head_dim]))
+            .forward_2d(k.reshape([batch * seq_len * self.num_kv_heads, self.head_dim]))
             .reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
             .swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
@@ -137,7 +137,7 @@ impl MultiHeadAttention {
         q: Tensor<4>,
         k: Tensor<4>,
         v: Tensor<4>,
-        mask: Option<Tensor<4>>,
+        mask: Option<&Tensor<4>>,
         cache: &mut AttentionKvCache,
     ) -> Tensor<3> {
         let [batch, _heads, seq_len, _] = q.dims();
@@ -149,12 +149,7 @@ impl MultiHeadAttention {
         let v = repeat_kv(v, n_rep);
 
         let scale = (self.head_dim as f64).sqrt().recip();
-        let mut attn = q.matmul(k.transpose()) * scale;
-        if let Some(mask) = mask {
-            attn = attn + mask;
-        }
-        let attn = activation::softmax(attn, 3);
-        let out = attn.matmul(v);
+        let out = scaled_dot_product_attention(q, k, v, scale, mask);
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);

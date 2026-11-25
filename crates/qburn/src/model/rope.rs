@@ -58,11 +58,11 @@ impl RotaryEmbedding {
 pub fn apply_rotary(
     q: Tensor<4>,
     k: Tensor<4>,
-    cos: Tensor<2>,
-    sin: Tensor<2>,
+    cos: &Tensor<2>,
+    sin: &Tensor<2>,
 ) -> (Tensor<4>, Tensor<4>) {
-    let cos = cos.unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
-    let sin = sin.unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
+    let cos = cos.clone().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
+    let sin = sin.clone().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
     let q_embed = q.clone() * cos.clone() + rotate_half(q) * sin.clone();
     let k_embed = k.clone() * cos + rotate_half(k) * sin;
     (q_embed, k_embed)

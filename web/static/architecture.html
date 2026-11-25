@@ -212,8 +212,9 @@ prompt →  tokenize →  chat template with image-pad slots
           <p>
             <code>TextDecoder</code> is a dense Qwen3 stack: RMSNorm, fused QKV
             with QK-Norm, grouped-query attention, and a SwiGLU MLP with fused
-            gate/up projections. Each layer keeps a KV cache so decode steps
-            only attend with a single new query. Prefill still uses a causal
+            gate/up projections. Each layer keeps a KV cache: prefill stores the
+            exact K/V tensor; the first decode step promotes it into a capacity
+            buffer, then tokens append in place. Prefill still uses a causal
             mask; decode does not rebuild one.
           </p>
           <p>

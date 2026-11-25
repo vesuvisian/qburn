@@ -53,7 +53,7 @@ impl TransformerBlock {
         &self,
         x: Tensor<3>,
         rope: &RotaryEmbedding,
-        mask: Option<Tensor<4>>,
+        mask: Option<&Tensor<4>>,
         cache: &mut AttentionKvCache,
         start_pos: usize,
     ) -> Tensor<3> {
@@ -71,9 +71,9 @@ impl TransformerBlock {
     pub fn forward_with_cos_sin(
         &self,
         x: Tensor<3>,
-        cos: Tensor<2>,
-        sin: Tensor<2>,
-        mask: Option<Tensor<4>>,
+        cos: &Tensor<2>,
+        sin: &Tensor<2>,
+        mask: Option<&Tensor<4>>,
         cache: &mut AttentionKvCache,
     ) -> Tensor<3> {
         let residual = x.clone();
@@ -137,8 +137,9 @@ impl TextDecoder {
     ) -> Tensor<3> {
         let mut x = self.embed(tokens);
         let mask = mask.map(|m| m.unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0));
+        let mask_ref = mask.as_ref();
         for (i, layer) in self.layers.iter().enumerate() {
-            x = layer.forward(x, rope, mask.clone(), &mut caches[i], start_pos);
+            x = layer.forward(x, rope, mask_ref, &mut caches[i], start_pos);
         }
         x = self.norm.forward(x);
         self.lm_head.forward(x)
@@ -156,14 +157,9 @@ impl TextDecoder {
     ) -> Tensor<3> {
         let mut x = embeddings;
         let mask = mask.map(|m| m.unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0));
+        let mask_ref = mask.as_ref();
         for (i, layer) in self.layers.iter().enumerate() {
-            x = layer.forward_with_cos_sin(
-                x,
-                cos.clone(),
-                sin.clone(),
-                mask.clone(),
-                &mut caches[i],
-            );
+            x = layer.forward_with_cos_sin(x, &cos, &sin, mask_ref, &mut caches[i]);
             if let Some((features, visual_mask, ds_layers)) = deepstack {
                 if let Some(ds_idx) = ds_layers.iter().position(|&l| l == i) {
                     if ds_idx < features.len() {

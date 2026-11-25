@@ -9,6 +9,7 @@ mod mlp;
 mod mrope;
 mod rms_norm;
 mod rope;
+mod sdpa;
 mod transformer;
 mod vision;
 

@@ -388,8 +388,7 @@ impl Qwen3Vl {
             rope_pos += 1;
             let tok = ids_to_tensor(&[next], device);
             let emb = self.decoder.embed(tok);
-            // q_len=1 with a growing KV cache is already causal — skip the
-            // all-zero mask upload that build_causal_mask(1, …) would produce.
+            // q_len=1 over the KV cache is already causal — skip a useless mask upload.
             let logits = self.decoder.forward_from_embeddings(
                 emb,
                 cos,

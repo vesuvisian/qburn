@@ -10,9 +10,11 @@ use burn::tensor::TensorData;
 use crate::config::VisionConfig;
 
 use super::rope::apply_rotary;
+use super::sdpa::scaled_dot_product_attention;
 
 /// CPU-side cache for absolute ViT pos embeds: one GPU→CPU table readback per
 /// encoder, then reused bilinear grids keyed by `(gh, gw, gt, merge)`.
+/// (GPU Burn interpolate drifted on WebGPU and collapsed greedy captions.)
 #[derive(Debug, Default)]
 struct PosEmbedCpuCache {
     /// Flattened square table `[side*side*c]` (align_corners bilinear source).
@@ -71,7 +73,7 @@ impl VisionAttention {
         }
     }
 
-    fn forward(&self, x: Tensor<2>, cos: Tensor<2>, sin: Tensor<2>) -> Tensor<2> {
+    fn forward(&self, x: Tensor<2>, cos: &Tensor<2>, sin: &Tensor<2>) -> Tensor<2> {
         let [seq, _] = x.dims();
         let qkv = self.qkv.forward(x);
         let q = qkv
@@ -91,8 +93,7 @@ impl VisionAttention {
 
         let (q, k) = apply_rotary(q, k, cos, sin);
         let scale = (self.head_dim as f64).sqrt().recip();
-        let attn = activation::softmax(q.matmul(k.transpose()) * scale, 3);
-        let out = attn.matmul(v);
+        let out = scaled_dot_product_attention(q, k, v, scale, None);
         let out = out
             .swap_dims(1, 2)
             .reshape([seq, self.num_heads * self.head_dim]);
@@ -118,7 +119,7 @@ impl VisionBlock {
         }
     }
 
-    fn forward(&self, x: Tensor<2>, cos: Tensor<2>, sin: Tensor<2>) -> Tensor<2> {
+    fn forward(&self, x: Tensor<2>, cos: &Tensor<2>, sin: &Tensor<2>) -> Tensor<2> {
         let h = self.attn.forward(self.norm1.forward(x.clone()), cos, sin);
         let x = x + h;
         let h = self.mlp.forward(self.norm2.forward(x.clone()));
@@ -285,7 +286,7 @@ impl VisionEncoder {
         let mut deepstack = Vec::new();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
-            x = block.forward(x, cos.clone(), sin.clone());
+            x = block.forward(x, &cos, &sin);
             if let Some(ds_i) = ds_indexes.iter().position(|&i| i == layer_idx) {
                 let feat = self.deepstack_mergers[ds_i].forward(x.clone(), self.config.spatial_merge_size);
                 deepstack.push(feat.unsqueeze_dim::<3>(0));

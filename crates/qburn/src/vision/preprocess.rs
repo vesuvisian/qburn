@@ -62,8 +62,8 @@ impl ImageProcessor {
             spatial_merge_size: cfg.spatial_merge_size,
             in_channels: cfg.in_channels,
             // HF shortest_edge is 65536. longest_edge is 16_777_216, but dense
-            // vision attention is O(patches²) and OOMs past ~1M pixels on typical
-            // desktop GPUs — keep a practical cap until flash/chunked attn lands.
+            // Vision attention uses Burn CubeCL attention (see model/sdpa.rs) but
+            // is still O(patches²) FLOPs; keep a practical pixel cap for TTFT.
             min_pixels: 65_536,
             max_pixels: 1_003_520,
         }
